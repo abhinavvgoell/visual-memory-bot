@@ -6,12 +6,12 @@ High-performance visual memory bot specifically optimized for:
 - Matiks (matiks.com) Memory Duels & Puzzle Battles (7x7, 6x6, 5x5, 4x4, 3x3)
 - Human Benchmark & standard memory matrix games
 
-How it works:
-1. Grabs live screen using high-speed MSS (60+ FPS, <3ms latency).
-2. Directly detects lit cyan/white tiles via HSV color masking (no brittle edge detection).
-3. Memorizes all lit tile coordinates during the flash phase.
-4. The instant tiles turn off (reveal finished), automatically clicks all tiles with blitz speed.
-5. Auto-detects and clicks the green "NEW GAME" button on match completion.
+Features:
+- 4 Selectable Speed Profiles: Slow, Medium, Fast, Extra Fast
+- High-speed MSS Screen Grabber (60+ FPS, <3ms latency)
+- Direct HSV Color Masking for lit Cyan and White tiles
+- Instant reaction the millisecond the reveal pattern finishes
+- Automatic detection and clicking of "NEW GAME" button
 =============================================================================
 """
 
@@ -47,23 +47,61 @@ STATE_WAITING = 0
 STATE_REVEAL = 1
 STATE_CLICK = 2
 
-# Speed Profiles (inter-click delay in seconds)
+# ----------------- 4 SPEED CONFIGURATIONS -----------------
 SPEED_CONFIGS = {
-    "blitz": {"click_delay": 0.008, "pre_delay": 0.01, "desc": "Blitz (Superhuman speed, ~8ms/click)"},
-    "fast":  {"click_delay": 0.016, "pre_delay": 0.02, "desc": "Fast (Standard competitive, ~16ms/click)"},
-    "human": {"click_delay": 0.045, "pre_delay": 0.05, "desc": "Human-like (~45ms/click)"},
-    "safe":  {"click_delay": 0.120, "pre_delay": 0.10, "desc": "Slow & Safe (~120ms/click)"},
+    "slow": {
+        "name": "Slow",
+        "click_delay": 0.120,
+        "pre_delay": 0.10,
+        "desc": "Slow (~120ms/click - relaxed & completely safe)",
+    },
+    "medium": {
+        "name": "Medium",
+        "click_delay": 0.050,
+        "pre_delay": 0.04,
+        "desc": "Medium (~50ms/click - natural fast human pace)",
+    },
+    "fast": {
+        "name": "Fast",
+        "click_delay": 0.016,
+        "pre_delay": 0.02,
+        "desc": "Fast (~16ms/click - competitive speed, recommended)",
+    },
+    "extra fast": {
+        "name": "Extra Fast",
+        "click_delay": 0.005,
+        "pre_delay": 0.008,
+        "desc": "Extra Fast (~5ms/click - instant blitz godmode)",
+    },
+}
+
+# Mapping aliases so users can type: 1, 2, 3, 4, extrafast, extra-fast, etc.
+SPEED_ALIASES = {
+    "1": "slow",
+    "slow": "slow",
+    "2": "medium",
+    "medium": "medium",
+    "med": "medium",
+    "3": "fast",
+    "fast": "fast",
+    "4": "extra fast",
+    "extra fast": "extra fast",
+    "extrafast": "extra fast",
+    "extra-fast": "extra fast",
+    "extra_fast": "extra fast",
+    "blitz": "extra fast",
 }
 
 
 class MemoryBot:
     def __init__(self, speed="fast", monitor_index=1):
-        self.config = SPEED_CONFIGS.get(speed, SPEED_CONFIGS["fast"])
-        self.speed_name = speed
+        clean_speed = SPEED_ALIASES.get(str(speed).lower().strip(), "fast")
+        self.config = SPEED_CONFIGS[clean_speed]
+        self.speed_name = clean_speed
         self.monitor_index = monitor_index
 
         self.state = STATE_WAITING
-        self.stored_clicks = {}      # dict of (cx, cy) -> timestamp to deduplicate
+        self.stored_clicks = {}
         self.last_action_time = 0.0
         self.click_cooldown_until = 0.0
         self.new_game_timer = None
@@ -71,20 +109,14 @@ class MemoryBot:
         self.last_status_time = 0.0
 
     def get_board_roi(self, frame):
-        """
-        Extract the central region where the game grid resides.
-        Excludes top navigation bar, scoreboards, and bottom taskbars.
-        """
+        """Extract central region where game grid resides."""
         h, w = frame.shape[:2]
         y1, y2 = int(h * 0.18), int(h * 0.95)
         x1, x2 = int(w * 0.20), int(w * 0.80)
         return frame[y1:y2, x1:x2], x1, y1
 
     def detect_active_tiles(self, frame):
-        """
-        Find all active (lit) tiles inside the board region.
-        Returns a list of absolute screen coordinates [(cx, cy), ...].
-        """
+        """Find all active lit tiles inside the board region."""
         roi, offset_x, offset_y = self.get_board_roi(frame)
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -98,11 +130,9 @@ class MemoryBot:
         tiles = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            # A valid game tile on 1080p/1440p is at least 600 pixels in area
             if area > 600:
                 bx, by, bw, bh = cv2.boundingRect(cnt)
                 aspect = bw / float(bh) if bh > 0 else 0
-                # Must be roughly square
                 if 0.70 <= aspect <= 1.40:
                     cx = offset_x + bx + bw // 2
                     cy = offset_y + by + bh // 2
@@ -111,12 +141,8 @@ class MemoryBot:
         return tiles
 
     def detect_new_game_button(self, frame):
-        """
-        Detect the green 'NEW GAME' button when a match finishes.
-        Returns (x, y) center if found, else None.
-        """
+        """Detect the green 'NEW GAME' button when a match finishes."""
         h, w = frame.shape[:2]
-        # Button is typically in the lower half of screen
         roi = frame[int(h * 0.40):, :]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -128,7 +154,6 @@ class MemoryBot:
             if area > 1000:
                 bx, by, bw, bh = cv2.boundingRect(cnt)
                 ratio = bw / float(bh) if bh > 0 else 0
-                # Buttons are wide rectangles (ratio 2.0 to 8.0)
                 if 2.0 <= ratio <= 8.0 and bw > 150:
                     cx = bx + bw // 2
                     cy = int(h * 0.40) + by + bh // 2
@@ -139,7 +164,7 @@ class MemoryBot:
     def run(self):
         print("=" * 65)
         print("  MATIKS MEMORY BOT - ONLINE & LISTENING")
-        print(f"  Speed Mode: [{self.config['desc']}]")
+        print(f"  Selected Speed: [{self.config['desc']}]")
         print("  Controls: Move mouse to top-left corner or press Ctrl+C to stop.")
         print("=" * 65)
 
@@ -196,10 +221,9 @@ class MemoryBot:
 
                     # Pattern unlit! (Flash period over -> time to click)
                     elif len(active_tiles) == 0 and len(self.stored_clicks) > 0:
-                        # Make sure flash was visible for at least a fraction of second
                         if current_time - self.last_action_time >= 0.02:
                             self.state = STATE_CLICK
-                            print(f"[PATTERN OFF] Flash ended. Initiating clicks on {len(self.stored_clicks)} tiles...")
+                            print(f"[PATTERN OFF] Flash ended. Clicking {len(self.stored_clicks)} tiles with {self.config['name']} speed...")
 
                     # Safety timeout: if pattern stays lit > 4s, reset
                     if current_time - self.last_action_time > 4.0:
@@ -253,17 +277,32 @@ class MemoryBot:
                     else:
                         self.new_game_timer = None
 
-                # Micro sleep to keep CPU efficient while maintaining >100 FPS
+                # Micro sleep to keep CPU efficient
                 time.sleep(0.003)
+
+
+def select_speed_interactively():
+    print("=" * 60)
+    print("  CHOOSE SPEED:")
+    print("    1) Slow         (~120ms / click  - relaxed & safe)")
+    print("    2) Medium       (~50ms  / click  - natural fast human)")
+    print("    3) Fast         (~16ms  / click  - competitive, recommended)")
+    print("    4) Extra Fast   (~5ms   / click  - instant blitz godmode)")
+    print("=" * 60)
+    choice = input("Enter choice [1-4] or press Enter for Fast (default): ").strip().lower()
+
+    if not choice:
+        return "fast"
+    return SPEED_ALIASES.get(choice, "fast")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Matiks & Visual Memory Bot")
     parser.add_argument(
         "--speed",
-        choices=["blitz", "fast", "human", "safe"],
-        default="fast",
-        help="Click speed (blitz: ~8ms, fast: ~16ms, human: ~45ms, safe: ~120ms)",
+        type=str,
+        default=None,
+        help="Speed mode: slow, medium, fast, extra fast (or 1, 2, 3, 4)",
     )
     parser.add_argument(
         "--monitor",
@@ -273,7 +312,13 @@ def main():
     )
     args = parser.parse_args()
 
-    bot = MemoryBot(speed=args.speed, monitor_index=args.monitor)
+    # Determine speed mode: from CLI flag if provided, else interactive menu
+    if args.speed:
+        selected_speed = SPEED_ALIASES.get(args.speed.lower().strip(), "fast")
+    else:
+        selected_speed = select_speed_interactively()
+
+    bot = MemoryBot(speed=selected_speed, monitor_index=args.monitor)
 
     try:
         bot.run()

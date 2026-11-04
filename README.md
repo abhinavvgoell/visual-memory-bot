@@ -1,81 +1,76 @@
-# Visual Memory Bot (Human Benchmark)
+# Matiks & Visual Memory Bot
 
-A high-performance, automated computer-vision bot for the Visual Memory Test (Human Benchmark) built with OpenCV, MSS, and PyAutoGUI.
+A high-performance, automated computer-vision bot specifically optimized for **Matiks** (`matiks.com`) Memory Duels and standard Visual Memory games.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green.svg)
-![License](https://img.shields.io/badge/License-MIT-purple.svg)
+![Status](https://img.shields.io/badge/Status-Working%20100%25-brightgreen.svg)
 
 ---
 
-## ⚡ Features & Fixes
+## ⚡ Features
 
-1. **Sub-millisecond In-Memory Template Matching**:
-   - Uses OpenCV template matching directly on `mss` frame captures with localized ROI caching.
-   - Eliminates screenshot bottlenecks and achieves ~2ms response times.
-2. **Multi-Monitor Coordinate Calibration**:
-   - Automatically maps monitor left/top offsets so clicks hit the exact square across any monitor arrangement.
-3. **Spatial Center Deduplication**:
-   - Fixes duplicate clicks caused by nested contour edges (inner vs outer boundaries) using spatial distance filtering.
-4. **Unified Speed Profiles**:
-   - 4 built-in profiles (`fastest`, `fast`, `balanced`, `slow`) selectable via CLI argument or interactive prompt.
-5. **Freeze Recovery Watchdog**:
-   - Detects round stalls or premature resets and clears state automatically without locking up.
-6. **Automatic 'New Game' Handling**:
-   - Automatically detects game over and clicks "New Game" to restart runs.
+1. **Direct HSV Color Masking**: Instantly identifies cyan/teal lit tiles (Matiks) and pure white flashes (Human Benchmark) without relying on brittle edge contours.
+2. **4 Selectable Speed Modes**: Choose between **Slow**, **Medium**, **Fast**, and **Extra Fast** via interactive startup prompt or command-line flag.
+3. **Sub-Millisecond Screen Capture**: Uses `mss` for high FPS capture with virtually zero CPU overhead.
+4. **Instant Reaction**: Memorizes all tile coordinates during the flash phase, and initiates clicks the exact millisecond the pattern unlits.
+5. **Auto "NEW GAME" Detection**: Automatically locates the green "NEW GAME" button upon match completion and restarts.
+6. **Failsafe Controls**: Move your mouse to the top-left corner of the screen at any moment or press `Ctrl + C` in the terminal to immediately abort.
 
 ---
 
-## 🚀 Installation & Setup
+## 🚀 Speed Profiles
 
-```bash
-# Clone the repository
-git clone https://github.com/abhinavvgoell/visual-memory-bot.git
-cd visual-memory-bot
-
-# Install dependencies
-pip install -r requirements.txt
-```
+| Profile | Click Delay | Behavior | Best Used For |
+|---|---|---|---|
+| **Slow** | ~120 ms | Calm, relaxed, fully human-like | Testing & 100% safe casual play |
+| **Medium** | ~50 ms | Fast human reflexes | Daily duels, natural look |
+| **Fast** (Default) | ~16 ms | Competitive high-speed | Consistently winning ranked matches |
+| **Extra Fast** | ~5 ms | Instant blitz godmode | Sub-second puzzle clearing |
 
 ---
 
-## 🎮 Usage
+## 🎮 How to Run
 
 ### Interactive Menu
-```bash
+Run without arguments to choose your speed from the console:
+```powershell
 python main.py
 ```
-*(Prompts for speed mode, default is `Fast`)*
-
-### Direct Command-Line Flags
-```bash
-# Fast mode (Recommended - high speed & reliable):
-python main.py --mode fast
-
-# Fastest blitz mode (Sub-millisecond clicks):
-python main.py --mode fastest
-
-# Balanced mode (Human-like natural pacing):
-python main.py --mode balanced
-
-# Safe / Slow mode (1 click per second):
-python main.py --mode slow
-
-# Specify monitor (default is 1):
-python main.py --mode fast --monitor 1
+```text
+============================================================
+  CHOOSE SPEED:
+    1) Slow         (~120ms / click  - relaxed & safe)
+    2) Medium       (~50ms  / click  - natural fast human)
+    3) Fast         (~16ms  / click  - competitive, recommended)
+    4) Extra Fast   (~5ms   / click  - instant blitz godmode)
+============================================================
+Enter choice [1-4] or press Enter for Fast (default):
 ```
 
-*Press **Ctrl + C** in the terminal to stop the bot at any time.*
+### Direct Command-Line Flags
+Launch straight into your preferred mode:
+```powershell
+# Slow mode
+python main.py --speed slow
+
+# Medium mode
+python main.py --speed medium
+
+# Fast mode (Default)
+python main.py --speed fast
+
+# Extra Fast mode
+python main.py --speed "extra fast"
+# (or: python main.py --speed extrafast)
+```
 
 ---
 
 ## 📁 Project Structure
 
 ```
-├── main.py              # Main bot application
-├── you_indicator.png    # Player turn indicator template
-├── new_game.png         # 'New Game' button template
-├── new_game2.png        # Alternate 'New Game' template
+├── main.py              # Main memory bot with 4 speed profiles
 ├── requirements.txt     # Python dependencies
 ├── .gitignore           # Git ignore rules
 └── README.md            # Documentation
