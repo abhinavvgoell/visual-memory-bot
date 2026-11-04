@@ -1,77 +1,65 @@
-# Matiks & Visual Memory Bot
+# Matiks & Visual Memory Bot (Retro Pixel Edition)
 
-A high-performance, automated computer-vision bot specifically optimized for **Matiks** (`matiks.com`) Memory Duels and standard Visual Memory games.
+A high-performance automated bot for **Matiks** (`matiks.com`) Memory Duels and standard Visual Memory games, featuring an **8-bit arcade cyber HUD interface**.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Computer%20Vision-green.svg)
+![Style](https://img.shields.io/badge/Aesthetic-8--Bit%20Pixel%20Retro-ff007f.svg)
 ![Status](https://img.shields.io/badge/Status-Working%20100%25-brightgreen.svg)
 
 ---
 
-## ⚡ Features
+## 🕹️ Pixelated Arcade HUD (Zero AI Slop)
 
-1. **Direct HSV Color Masking**: Instantly identifies cyan/teal lit tiles (Matiks) and pure white flashes (Human Benchmark) without relying on brittle edge contours.
-2. **4 Selectable Speed Modes**: Choose between **Slow**, **Medium**, **Fast**, and **Extra Fast** via interactive startup prompt or command-line flag.
-3. **Sub-Millisecond Screen Capture**: Uses `mss` for high FPS capture with virtually zero CPU overhead.
-4. **Instant Reaction**: Memorizes all tile coordinates during the flash phase, and initiates clicks the exact millisecond the pattern unlits.
-5. **Auto "NEW GAME" Detection**: Automatically locates the green "NEW GAME" button upon match completion and restarts.
-6. **Failsafe Controls**: Move your mouse to the top-left corner of the screen at any moment or press `Ctrl + C` in the terminal to immediately abort.
-
----
-
-## 🚀 Speed Profiles
-
-| Profile | Click Delay | Behavior | Best Used For |
-|---|---|---|---|
-| **Slow** | ~120 ms | Calm, relaxed, fully human-like | Testing & 100% safe casual play |
-| **Medium** | ~50 ms | Fast human reflexes | Daily duels, natural look |
-| **Fast** (Default) | ~16 ms | Competitive high-speed | Consistently winning ranked matches |
-| **Extra Fast** | ~5 ms | Instant blitz godmode | Sub-second puzzle clearing |
+The bot comes with a custom **8-bit retro arcade floating HUD**:
+- **Always-on-Top**: Floats unobtrusively in the corner of your screen while you play.
+- **Chunky Pixel Buttons**: Instant one-click `[ ▶ ENGAGE BOT ]` and `[ ■ HALT BOT ]`.
+- **On-The-Fly Speed Calibration**: Switch speeds mid-match without restarting:
+  - `[ 1: SLOW ]` (~120ms / click - relaxed, safe)
+  - `[ 2: MED ]` (~50ms / click - fast human reflexes)
+  - `[ 3: FAST ]` (~16ms / click - competitive win)
+  - `[ 4: BLITZ ]` (~5ms / click - instant godmode)
+- **Live Arcade Telemetry**:
+  - Live Status LED: `● [ STANDBY ]` / `● [ MEMORIZING ]` / `● [ BLITZING ]`
+  - Real-time Stats: `ROUNDS WON`, `TILES CLEARED`, and `LAST REACTION MS`.
+- **Auto-Restart Switch**: Toggle automatic clicking of the green `NEW GAME` button.
 
 ---
 
-## 🎮 How to Run
+## 🎮 How to Launch
 
-### Interactive Menu
-Run without arguments to choose your speed from the console:
+### 1. Launch the Pixelated GUI (Default)
+Simply run:
 ```powershell
 python main.py
 ```
-```text
-============================================================
-  CHOOSE SPEED:
-    1) Slow         (~120ms / click  - relaxed & safe)
-    2) Medium       (~50ms  / click  - natural fast human)
-    3) Fast         (~16ms  / click  - competitive, recommended)
-    4) Extra Fast   (~5ms   / click  - instant blitz godmode)
-============================================================
-Enter choice [1-4] or press Enter for Fast (default):
-```
+A sleek, retro pixelated arcade controller window will appear floating on your screen. Click **`[ ▶ ENGAGE BOT ]`** to start playing!
 
-### Direct Command-Line Flags
-Launch straight into your preferred mode:
+### 2. Headless CLI Mode (Terminal Only)
+If you prefer running without the graphical interface:
 ```powershell
-# Slow mode
-python main.py --speed slow
-
-# Medium mode
-python main.py --speed medium
-
-# Fast mode (Default)
-python main.py --speed fast
-
-# Extra Fast mode
-python main.py --speed "extra fast"
-# (or: python main.py --speed extrafast)
+python main.py --cli
+```
+You can also specify initial speed and monitor:
+```powershell
+python main.py --cli --speed fast
+python main.py --cli --speed "extra fast"
 ```
 
 ---
 
-## 📁 Project Structure
+## 🛑 Emergency Abort
+- Push your mouse into the **top-left corner** of your monitor to trigger the instant PyAutoGUI failsafe.
+- Or click **`[ ■ HALT BOT ]`** in the pixel HUD.
+- Or press `Ctrl + C` in the console.
+
+---
+
+## 📁 Repository Structure
 
 ```
-├── main.py              # Main memory bot with 4 speed profiles
-├── requirements.txt     # Python dependencies
+├── main.py              # Main bot engine & 8-bit retro pixel GUI
+├── requirements.txt     # Dependencies (opencv, mss, pyautogui, etc.)
 ├── .gitignore           # Git ignore rules
 └── README.md            # Documentation
 ```
