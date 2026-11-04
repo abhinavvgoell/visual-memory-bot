@@ -1,22 +1,25 @@
 """
 =============================================================================
-MATIKS & VISUAL MEMORY BOT - RETRO PIXEL EDITION (v2.4)
+MATIKS & VISUAL MEMORY BOT - 8-BIT RETRO PIXEL EDITION
 =============================================================================
+A true retro arcade pixel-art interface (authentic 8-bit bevels, tactile
+button presses, CRT phosphor terminal display, and dynamic font loading).
+
 Features:
-- Pixelated, 8-bit arcade cyber HUD interface (zero AI slop, pure retro vibes)
-- Live on-the-fly speed switching (Slow, Medium, Fast, Extra Fast / Blitz)
-- Background daemon worker thread with thread-safe UI updates
-- Master [ ENGAGE ] / [ HALT ] chunky pixel buttons
-- Auto-restart toggle for automatic "NEW GAME" clicking
-- Real-time telemetry: Round Counter, Tiles Cleared, Last Speed ms
-- Always-on-top floating overlay so you can play without switching windows
-- CLI headless fallback support: python main.py --cli
+- Authentic 8-bit beveled pixel buttons with tactile click depression
+- Dynamic Press Start 2P arcade font loading
+- CRT Recessed Screen with live status and telemetry (Rounds, Tiles, Time)
+- Live on-the-fly 4-Speed calibration (Slow, Medium, Fast, Blitz)
+- 8-bit toggle for Auto-Restart (New Game)
+- Always-on-top draggable retro arcade overlay
+- Headless CLI option: python main.py --cli
 =============================================================================
 """
 
 import os
 import sys
 import time
+import ctypes
 import threading
 import argparse
 import traceback
@@ -25,13 +28,27 @@ import cv2
 import mss
 import pyautogui
 import tkinter as tk
-from tkinter import font as tkfont
 
-# Set PyAutoGUI properties for maximum speed
-pyautogui.FAILSAFE = True  # Move mouse to top-left corner to emergency abort
-pyautogui.PAUSE = 0.0      # Zero artificial delay between clicks
+# Disable PyAutoGUI artificial delays for pure speed
+pyautogui.FAILSAFE = True  # Move mouse to top-left corner to abort
+pyautogui.PAUSE = 0.0
 
-# ----------------- COLOR MASKS (HSV) -----------------
+# ----------------- BASE PATHS & FONT REGISTRATION -----------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_FILE = os.path.join(BASE_DIR, "PressStart2P.ttf")
+
+# Register 8-bit pixel font dynamically at runtime in Windows GDI
+HAS_PIXEL_FONT = False
+if os.path.exists(FONT_FILE) and sys.platform == "win32":
+    try:
+        res = ctypes.windll.gdi32.AddFontResourceExW(FONT_FILE, 0x10, 0)
+        HAS_PIXEL_FONT = (res > 0)
+    except Exception:
+        HAS_PIXEL_FONT = False
+
+PIXEL_FONT_NAME = "Press Start 2P" if HAS_PIXEL_FONT else "Consolas"
+
+# ----------------- COLOR CONSTANTS (HSV) -----------------
 LOWER_CYAN = np.array([75, 50, 120])
 UPPER_CYAN = np.array([105, 255, 255])
 
@@ -41,28 +58,32 @@ UPPER_WHITE = np.array([180, 45, 255])
 LOWER_GREEN = np.array([35, 60, 80])
 UPPER_GREEN = np.array([85, 255, 255])
 
-# ----------------- 4 SPEED PROFILES -----------------
+# ----------------- 4 SPEED CONFIGS -----------------
 SPEED_PROFILES = {
     "slow": {
-        "label": "1: SLOW",
+        "name": "Slow",
+        "tag": "1: SLOW",
         "click_delay": 0.120,
         "pre_delay": 0.10,
         "desc": "~120ms/click (relaxed & human)",
     },
     "medium": {
-        "label": "2: MED",
+        "name": "Medium",
+        "tag": "2: MED",
         "click_delay": 0.050,
         "pre_delay": 0.04,
         "desc": "~50ms/click (fast human pace)",
     },
     "fast": {
-        "label": "3: FAST",
+        "name": "Fast",
+        "tag": "3: FAST",
         "click_delay": 0.016,
         "pre_delay": 0.02,
         "desc": "~16ms/click (competitive win)",
     },
     "extra fast": {
-        "label": "4: BLITZ",
+        "name": "Extra Fast",
+        "tag": "4: BLITZ",
         "click_delay": 0.005,
         "pre_delay": 0.008,
         "desc": "~5ms/click (instant godmode)",
@@ -172,7 +193,7 @@ class BotEngine:
                         self.state = 0
                         self.stored_clicks = {}
                         if self.on_status:
-                            self.on_status("WATCHING", "#00ffcc")
+                            self.on_status("SEARCHING", "#00ffcc")
 
                 elif self.state == 2:  # CLICK
                     points = list(self.stored_clicks.keys())
@@ -216,7 +237,7 @@ class BotEngine:
                             time.sleep(1.5)
                             self.new_game_timer = None
                             if self.on_status:
-                                self.on_status("WATCHING", "#00ffcc")
+                                self.on_status("SEARCHING", "#00ffcc")
                     else:
                         self.new_game_timer = None
 
@@ -260,36 +281,143 @@ class BotEngine:
 
 
 # =============================================================================
-# RETRO PIXEL UI (Pure 8-bit Arcade Cyber Aesthetic)
+# AUTHENTIC 8-BIT RETRO PIXEL CANVAS BUTTON
 # =============================================================================
-class PixelUI:
-    # 8-bit Cyberpunk Arcade Color Palette
-    C_BG = "#08090f"         # Deep black-blue CRT base
-    C_PANEL = "#101321"      # Arcade cabinet inner frame
-    C_BORDER = "#1f2744"     # Dark pixel grid line
-    C_CYAN = "#00ffcc"       # Cyber cyan
-    C_GREEN = "#39ff14"      # Arcade phosphor neon green
-    C_PINK = "#ff0055"       # Cyber hot pink
-    C_YELLOW = "#ffe600"     # Arcade warning yellow
-    C_WHITE = "#e8eaf6"      # Crisp pixel white
-    C_MUTED = "#525c7a"      # Dim pixel text
+class PixelButton(tk.Canvas):
+    """
+    Genuine 8-bit beveled pixel button with stepped corners,
+    chunky 3D highlights, hover glow, and tactile 2px click depression.
+    """
+    def __init__(
+        self, parent, text, command=None, width=150, height=36,
+        bg_color="#181c2b", fg_color="#ffffff",
+        border_light="#3e4868", border_dark="#080910",
+        highlight_color=None, font_size=8, **kwargs
+    ):
+        super().__init__(
+            parent, width=width, height=height, bg=parent["bg"],
+            highlightthickness=0, bd=0, cursor="hand2", **kwargs
+        )
+        self.text = text
+        self.command = command
+        self.w = width
+        self.h = height
+        self.bg_color = bg_color
+        self.fg_color = fg_color
+        self.border_light = border_light
+        self.border_dark = border_dark
+        self.highlight_color = highlight_color
+        self.font_size = font_size
+
+        self.is_pressed = False
+        self.is_active = False
+
+        self.draw()
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def set_colors(self, bg_color, fg_color, border_light, border_dark):
+        self.bg_color = bg_color
+        self.fg_color = fg_color
+        self.border_light = border_light
+        self.border_dark = border_dark
+        self.draw()
+
+    def set_active(self, active):
+        self.is_active = active
+        self.draw()
+
+    def set_text(self, text):
+        self.text = text
+        self.draw()
+
+    def draw(self):
+        self.delete("all")
+        offset = 2 if self.is_pressed else 0
+
+        # Outer Stepped 8-Bit Pixel Silhouette (missing 2px corner pixels)
+        self.create_rectangle(2, 0, self.w - 2, self.h, fill="#000000", width=0)
+        self.create_rectangle(0, 2, self.w, self.h - 2, fill="#000000", width=0)
+
+        # If active, glow border
+        border_top = self.highlight_color if self.is_active and self.highlight_color else (
+            self.border_dark if self.is_pressed else self.border_light
+        )
+        border_bot = self.highlight_color if self.is_active and self.highlight_color else (
+            self.border_light if self.is_pressed else self.border_dark
+        )
+
+        # Inner Button Face
+        face_bg = self.bg_color
+        self.create_rectangle(2, 2, self.w - 2, self.h - 2, fill=face_bg, width=0)
+
+        # 3D Pixel Bevel Lines (2px thick)
+        # Top line
+        self.create_line(2, 2, self.w - 2, 2, fill=border_top, width=2)
+        # Left line
+        self.create_line(2, 2, 2, self.h - 2, fill=border_top, width=2)
+        # Right shadow
+        self.create_line(self.w - 3, 3, self.w - 3, self.h - 2, fill=border_bot, width=2)
+        # Bottom shadow
+        self.create_line(3, self.h - 3, self.w - 2, self.h - 3, fill=border_bot, width=2)
+
+        # Center Text (Shifts 2px when pressed down)
+        font_spec = (PIXEL_FONT_NAME, self.font_size, "bold") if not HAS_PIXEL_FONT else (PIXEL_FONT_NAME, self.font_size)
+        self.create_text(
+            self.w // 2 + offset, self.h // 2 + offset,
+            text=self.text, fill=self.fg_color, font=font_spec
+        )
+
+    def _on_press(self, event):
+        self.is_pressed = True
+        self.draw()
+
+    def _on_release(self, event):
+        self.is_pressed = False
+        self.draw()
+        if self.command:
+            self.command()
+
+    def _on_enter(self, event):
+        if not self.is_active:
+            self.draw()
+
+    def _on_leave(self, event):
+        self.is_pressed = False
+        self.draw()
+
+
+# =============================================================================
+# RETRO PIXEL UI (Authentic 8-Bit Arcade Cyber Aesthetic)
+# =============================================================================
+class PixelRetroUI:
+    # 8-Bit Cyber Arcade Palette
+    BG_MAIN = "#0a0b12"      # Pitch Black Arcade Cabinet
+    BG_PANEL = "#121524"     # Dark Pixel Slate
+    BG_CRT = "#050d0a"       # CRT Phosphor Terminal Green/Black
+    C_CYAN = "#00ffcc"       # Cyber Neon Cyan
+    C_GREEN = "#00ff66"      # Phosphor Neon Green
+    C_PINK = "#ff0055"       # Hot Arcade Pink
+    C_YELLOW = "#ffe600"     # Arcade Warning Yellow
+    C_WHITE = "#ffffff"      # Crisp Pixel White
+    C_MUTED = "#4e5773"      # Dim Pixel Shadow
 
     def __init__(self, bot):
         self.bot = bot
         self.root = tk.Tk()
         self.root.title("MATIKS // BOT_OS")
-        self.root.geometry("380x480")
+        self.root.geometry("400x530")
         self.root.resizable(False, False)
-        self.root.configure(bg=self.C_BG)
+        self.root.configure(bg=self.BG_MAIN)
 
-        # Always-on-top so it floats above the browser without getting hidden
+        # Always-on-top so it floats seamlessly above browser
         self.root.attributes("-topmost", True)
 
-        # Monospace Pixel Font setup
-        self.fn_pixel = ("Consolas", 9, "bold")
-        self.fn_title = ("Consolas", 12, "bold")
-        self.fn_large = ("Consolas", 14, "bold")
-        self.fn_hud = ("Consolas", 10, "bold")
+        # Drag window tracking
+        self._drag_x = 0
+        self._drag_y = 0
 
         # Hook bot callbacks
         self.bot.on_status = self.update_status_threadsafe
@@ -299,208 +427,228 @@ class PixelUI:
         self._build_ui()
 
     def _build_ui(self):
-        # 1. Top Retro Header Box
-        header = tk.Frame(self.root, bg=self.C_PANEL, highlightthickness=2, highlightbackground=self.C_CYAN)
-        header.pack(fill=tk.X, padx=10, pady=(10, 6))
+        # 1. RETRO TITLE BAR (Beveled Header)
+        title_canvas = tk.Canvas(self.root, width=380, height=36, bg=self.BG_MAIN, highlightthickness=0, bd=0)
+        title_canvas.pack(fill=tk.X, padx=10, pady=(10, 6))
 
-        title = tk.Label(
-            header,
-            text="[■■] MATIKS // BOT_OS v2.4",
-            font=self.fn_title,
-            fg=self.C_CYAN,
-            bg=self.C_PANEL,
-            padx=10,
-            pady=6,
+        # 8-bit stepped bevel on title bar
+        title_canvas.create_rectangle(2, 0, 378, 36, fill="#000", width=0)
+        title_canvas.create_rectangle(0, 2, 380, 34, fill="#000", width=0)
+        title_canvas.create_rectangle(2, 2, 378, 34, fill=self.BG_PANEL, width=0)
+        title_canvas.create_line(2, 2, 378, 2, fill=self.C_CYAN, width=2)
+        title_canvas.create_line(2, 2, 2, 34, fill=self.C_CYAN, width=2)
+
+        font_hdr = (PIXEL_FONT_NAME, 9) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 10, "bold")
+        title_canvas.create_text(190, 18, text="■■ MATIKS // BOT_OS ■■", fill=self.C_CYAN, font=font_hdr)
+
+        # Make title draggable
+        title_canvas.bind("<ButtonPress-1>", self._start_drag)
+        title_canvas.bind("<B1-Motion>", self._on_drag)
+
+        # 2. RECESSED CRT SCREEN (Terminal Telemetry Display)
+        crt_canvas = tk.Canvas(self.root, width=380, height=130, bg=self.BG_MAIN, highlightthickness=0, bd=0)
+        crt_canvas.pack(fill=tk.X, padx=10, pady=4)
+
+        # Recessed 8-bit bezel (dark top/left shadow, light bottom/right highlight)
+        crt_canvas.create_rectangle(2, 0, 378, 130, fill="#000000", width=0)
+        crt_canvas.create_rectangle(0, 2, 380, 128, fill="#000000", width=0)
+        crt_canvas.create_rectangle(2, 2, 378, 128, fill=self.BG_CRT, width=0)
+        # Inner shadow
+        crt_canvas.create_line(2, 2, 378, 2, fill="#020504", width=2)
+        crt_canvas.create_line(2, 2, 2, 128, fill="#020504", width=2)
+        crt_canvas.create_line(377, 3, 377, 128, fill="#182c22", width=2)
+        crt_canvas.create_line(3, 127, 378, 127, fill="#182c22", width=2)
+
+        # Scanlines simulation on CRT screen
+        for y_line in range(6, 126, 4):
+            crt_canvas.create_line(4, y_line, 376, y_line, fill="#030806", width=1)
+
+        font_sys = (PIXEL_FONT_NAME, 7) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 8, "bold")
+        font_status = (PIXEL_FONT_NAME, 10) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 12, "bold")
+        font_stats = (PIXEL_FONT_NAME, 8) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 9, "bold")
+
+        crt_canvas.create_text(16, 20, text=">> SYS_READY // TELEMETRY", fill=self.C_MUTED, font=font_sys, anchor="w")
+
+        # Status text element
+        self.crt_status_id = crt_canvas.create_text(
+            16, 52, text="● [ STANDBY ]", fill=self.C_YELLOW, font=font_status, anchor="w"
         )
-        title.pack(side=tk.LEFT)
 
-        tag = tk.Label(
-            header,
-            text="8-BIT",
-            font=self.fn_pixel,
-            fg=self.C_YELLOW,
-            bg=self.C_PANEL,
-            padx=10,
+        # Telemetry line
+        self.crt_rounds_id = crt_canvas.create_text(
+            16, 88, text="ROUNDS: 000    TILES: 000", fill=self.C_WHITE, font=font_stats, anchor="w"
         )
-        tag.pack(side=tk.RIGHT)
-
-        # 2. Status HUD Panel
-        hud_frame = tk.Frame(self.root, bg=self.C_PANEL, highlightthickness=2, highlightbackground=self.C_BORDER)
-        hud_frame.pack(fill=tk.X, padx=10, pady=4)
-
-        tk.Label(hud_frame, text="CORE STATUS:", font=self.fn_pixel, fg=self.C_MUTED, bg=self.C_PANEL).pack(anchor="w", padx=10, pady=(8, 0))
-
-        self.lbl_status = tk.Label(
-            hud_frame,
-            text="● [ STANDBY ]",
-            font=self.fn_large,
-            fg=self.C_YELLOW,
-            bg=self.C_PANEL,
-            pady=4,
+        self.crt_speed_id = crt_canvas.create_text(
+            16, 108, text="LAST TIME: --.- MS", fill=self.C_GREEN, font=font_stats, anchor="w"
         )
-        self.lbl_status.pack(anchor="w", padx=10)
+        self.crt_canvas = crt_canvas
 
-        # Telemetry Grid inside HUD
-        stats_box = tk.Frame(hud_frame, bg=self.C_PANEL)
-        stats_box.pack(fill=tk.X, padx=10, pady=(0, 8))
+        # 3. SPEED CALIBRATION BOX (Pixel Frame)
+        cal_box = tk.Frame(self.root, bg=self.BG_MAIN)
+        cal_box.pack(fill=tk.X, padx=10, pady=6)
 
-        self.lbl_rounds = tk.Label(stats_box, text="ROUNDS : 000", font=self.fn_hud, fg=self.C_WHITE, bg=self.C_PANEL)
-        self.lbl_rounds.pack(side=tk.LEFT)
+        font_sub = (PIXEL_FONT_NAME, 7) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 8, "bold")
+        tk.Label(cal_box, text=">> CALIBRATE SPEED <<", font=font_sub, fg=self.C_CYAN, bg=self.BG_MAIN).pack(anchor="w", padx=2, pady=(0, 4))
 
-        self.lbl_tiles = tk.Label(stats_box, text="TILES : 000", font=self.fn_hud, fg=self.C_WHITE, bg=self.C_PANEL)
-        self.lbl_tiles.pack(side=tk.LEFT, padx=12)
-
-        self.lbl_last_ms = tk.Label(stats_box, text="LAST : --ms", font=self.fn_hud, fg=self.C_CYAN, bg=self.C_PANEL)
-        self.lbl_last_ms.pack(side=tk.RIGHT)
-
-        # 3. Speed Selector (Chunky Pixel Switches)
-        speed_frame = tk.Frame(self.root, bg=self.C_PANEL, highlightthickness=2, highlightbackground=self.C_BORDER)
-        speed_frame.pack(fill=tk.X, padx=10, pady=6)
-
-        tk.Label(
-            speed_frame,
-            text="SPEED CALIBRATION:",
-            font=self.fn_pixel,
-            fg=self.C_MUTED,
-            bg=self.C_PANEL,
-        ).pack(anchor="w", padx=10, pady=(6, 4))
-
-        grid_btns = tk.Frame(speed_frame, bg=self.C_PANEL)
-        grid_btns.pack(fill=tk.X, padx=8, pady=(0, 6))
+        # 2x2 Chunky Pixel Button Grid
+        btn_grid = tk.Frame(cal_box, bg=self.BG_MAIN)
+        btn_grid.pack(fill=tk.X)
 
         for idx, (skey, scfg) in enumerate(SPEED_PROFILES.items()):
             row = idx // 2
             col = idx % 2
-            btn = tk.Button(
-                grid_btns,
-                text=f"[{scfg['label']}]",
-                font=self.fn_pixel,
-                relief=tk.FLAT,
-                bd=0,
-                padx=8,
-                pady=6,
-                activebackground=self.C_CYAN,
-                activeforeground=self.C_BG,
+            btn = PixelButton(
+                btn_grid,
+                text=scfg["tag"],
+                width=182,
+                height=36,
+                bg_color="#141828",
+                fg_color=self.C_WHITE,
+                border_light="#2e385c",
+                border_dark="#080912",
+                highlight_color=self.C_CYAN,
+                font_size=7 if HAS_PIXEL_FONT else 8,
                 command=lambda k=skey: self.select_speed(k),
             )
-            btn.grid(row=row, column=col, sticky="nsew", padx=3, pady=3)
-            grid_btns.columnconfigure(col, weight=1)
+            btn.grid(row=row, column=col, padx=3, pady=3, sticky="nsew")
+            btn_grid.columnconfigure(col, weight=1)
             self.speed_buttons[skey] = btn
 
+        # Speed Description
         self.lbl_speed_desc = tk.Label(
-            speed_frame,
-            text=SPEED_PROFILES[self.bot.speed_key]["desc"],
-            font=self.fn_pixel,
-            fg=self.C_CYAN,
-            bg=self.C_PANEL,
+            cal_box,
+            text=f"> {SPEED_PROFILES[self.bot.speed_key]['desc']}",
+            font=font_sub,
+            fg=self.C_YELLOW,
+            bg=self.BG_MAIN,
             pady=4,
         )
-        self.lbl_speed_desc.pack(anchor="w", padx=10)
+        self.lbl_speed_desc.pack(anchor="w", padx=2)
 
-        # Highlight current speed
         self._refresh_speed_buttons()
 
-        # 4. Auto New Game Toggle Switch
-        toggle_frame = tk.Frame(self.root, bg=self.C_BG)
-        toggle_frame.pack(fill=tk.X, padx=12, pady=4)
+        # 4. AUTO-RESTART TOGGLE (8-bit pixel switch)
+        toggle_box = tk.Frame(self.root, bg=self.BG_MAIN)
+        toggle_box.pack(fill=tk.X, padx=10, pady=(0, 6))
 
-        self.var_auto_ng = tk.BooleanVar(value=True)
-        chk = tk.Checkbutton(
-            toggle_frame,
-            text="[X] AUTO-RESTART (NEW GAME)",
-            variable=self.var_auto_ng,
-            font=self.fn_pixel,
-            fg=self.C_WHITE,
-            bg=self.C_BG,
-            selectcolor=self.C_PANEL,
-            activebackground=self.C_BG,
-            activeforeground=self.C_CYAN,
+        self.btn_toggle_ng = PixelButton(
+            toggle_box,
+            text="[■] AUTO-RESTART: ON",
+            width=375,
+            height=30,
+            bg_color="#0e1b18",
+            fg_color=self.C_GREEN,
+            border_light="#1b4d3e",
+            border_dark="#050a08",
+            font_size=7 if HAS_PIXEL_FONT else 8,
             command=self.toggle_new_game,
         )
-        chk.pack(anchor="w")
+        self.btn_toggle_ng.pack(fill=tk.X)
 
-        # 5. Chunky Pixel Master Action Button
-        action_box = tk.Frame(self.root, bg=self.C_BG)
-        action_box.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
+        # 5. MASTER ENGAGE / HALT BUTTON (Large Chunky Arcade Button)
+        action_box = tk.Frame(self.root, bg=self.BG_MAIN)
+        action_box.pack(fill=tk.X, padx=10, pady=(4, 6))
 
-        self.btn_master = tk.Button(
+        self.btn_master = PixelButton(
             action_box,
-            text="[ ▶ ENGAGE BOT ]",
-            font=self.fn_large,
-            fg=self.C_BG,
-            bg=self.C_GREEN,
-            activebackground=self.C_WHITE,
-            activeforeground=self.C_BG,
-            relief=tk.FLAT,
-            bd=0,
+            text="▶ ENGAGE BOT",
+            width=375,
+            height=54,
+            bg_color="#00a843",
+            fg_color="#000000",
+            border_light=self.C_GREEN,
+            border_dark="#004d1f",
+            font_size=10 if HAS_PIXEL_FONT else 11,
             command=self.toggle_bot,
         )
-        self.btn_master.pack(fill=tk.BOTH, expand=True)
+        self.btn_master.pack(fill=tk.X)
 
-        # 6. Bottom hint footer
-        footer = tk.Label(
+        # 6. Bottom Failsafe Reminder
+        tk.Label(
             self.root,
-            text="ABORT: MOVE MOUSE TO CORNER  |  ALWAYS ON TOP",
-            font=("Consolas", 8),
+            text="EMERGENCY ABORT: SLIDE MOUSE TO CORNER",
+            font=("Consolas", 7, "bold"),
             fg=self.C_MUTED,
-            bg=self.C_BG,
-            pady=2,
-        )
-        footer.pack(side=tk.BOTTOM)
+            bg=self.BG_MAIN,
+            pady=4,
+        ).pack(side=tk.BOTTOM)
+
+    def _start_drag(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def _on_drag(self, event):
+        deltax = event.x - self._drag_x
+        deltay = event.y - self._drag_y
+        new_x = self.root.winfo_x() + deltax
+        new_y = self.root.winfo_y() + deltay
+        self.root.geometry(f"+{new_x}+{new_y}")
 
     def select_speed(self, skey):
         self.bot.set_speed(skey)
-        self.lbl_speed_desc.configure(text=SPEED_PROFILES[skey]["desc"])
+        self.lbl_speed_desc.configure(text=f"> {SPEED_PROFILES[skey]['desc']}")
         self._refresh_speed_buttons()
 
     def _refresh_speed_buttons(self):
         for skey, btn in self.speed_buttons.items():
             if skey == self.bot.speed_key:
-                # Active pixel button: Neon Cyan highlight
-                btn.configure(
-                    bg=self.C_CYAN,
-                    fg=self.C_BG,
-                    highlightthickness=2,
-                    highlightbackground=self.C_WHITE,
+                # Active: Glowing Neon Cyan
+                btn.set_colors(
+                    bg_color="#003830",
+                    fg_color=self.C_CYAN,
+                    border_light=self.C_CYAN,
+                    border_dark="#00241f",
                 )
+                btn.set_active(True)
             else:
-                # Inactive button: Muted dark
-                btn.configure(
-                    bg=self.C_BG,
-                    fg=self.C_WHITE,
-                    highlightthickness=1,
-                    highlightbackground=self.C_BORDER,
+                # Inactive: Dim 8-bit slate
+                btn.set_colors(
+                    bg_color="#141828",
+                    fg_color="#a8b2d1",
+                    border_light="#2e385c",
+                    border_dark="#080912",
                 )
+                btn.set_active(False)
 
     def toggle_new_game(self):
-        self.bot.set_auto_new_game(self.var_auto_ng.get())
+        new_val = not self.bot.auto_new_game
+        self.bot.set_auto_new_game(new_val)
+        if new_val:
+            self.btn_toggle_ng.set_text("[■] AUTO-RESTART: ON")
+            self.btn_toggle_ng.set_colors("#0e1b18", self.C_GREEN, "#1b4d3e", "#050a08")
+        else:
+            self.btn_toggle_ng.set_text("[ ] AUTO-RESTART: OFF")
+            self.btn_toggle_ng.set_colors("#181820", self.C_MUTED, "#2e2e38", "#08080c")
 
     def toggle_bot(self):
         if not self.bot.is_running:
             self.bot.start()
-            self.btn_master.configure(
-                text="[ ■ HALT BOT ]",
-                bg=self.C_PINK,
-                fg=self.C_WHITE,
+            self.btn_master.set_text("■ HALT BOT")
+            self.btn_master.set_colors(
+                bg_color="#c20038",
+                fg_color=self.C_WHITE,
+                border_light=self.C_PINK,
+                border_dark="#500017",
             )
         else:
             self.bot.stop()
-            self.btn_master.configure(
-                text="[ ▶ ENGAGE BOT ]",
-                bg=self.C_GREEN,
-                fg=self.C_BG,
+            self.btn_master.set_text("▶ ENGAGE BOT")
+            self.btn_master.set_colors(
+                bg_color="#00a843",
+                fg_color="#000000",
+                border_light=self.C_GREEN,
+                border_dark="#004d1f",
             )
 
     def update_status_threadsafe(self, text, color):
         def _update():
-            self.lbl_status.configure(text=f"● [ {text} ]", fg=color)
+            self.crt_canvas.itemconfig(self.crt_status_id, text=f"● [ {text} ]", fill=color)
         self.root.after(0, _update)
 
     def update_stats_threadsafe(self, rounds, tiles, last_ms):
         def _update():
-            self.lbl_rounds.configure(text=f"ROUNDS : {rounds:03d}")
-            self.lbl_tiles.configure(text=f"TILES : {tiles:03d}")
-            self.lbl_last_ms.configure(text=f"LAST : {last_ms:.0f}ms")
+            self.crt_canvas.itemconfig(self.crt_rounds_id, text=f"ROUNDS: {rounds:03d}    TILES: {tiles:03d}")
+            self.crt_canvas.itemconfig(self.crt_speed_id, text=f"LAST TIME: {last_ms:.1f} MS")
         self.root.after(0, _update)
 
     def run(self):
@@ -517,7 +665,7 @@ def run_cli_mode(speed, monitor):
     bot = BotEngine(speed_key=speed, monitor_index=monitor)
     print("=" * 65)
     print("  MATIKS MEMORY BOT [CLI HEADLESS MODE]")
-    print(f"  Speed: [{bot.speed_cfg['label']}] - {bot.speed_cfg['desc']}")
+    print(f"  Speed: [{bot.speed_cfg['tag']}] - {bot.speed_cfg['desc']}")
     print("  Controls: Move mouse to top-left corner or press Ctrl+C to stop.")
     print("=" * 65)
 
@@ -555,9 +703,8 @@ def main():
     if args.cli:
         run_cli_mode(speed=clean_speed, monitor=args.monitor)
     else:
-        # Default: Launch the Retro Pixelated Arcade GUI!
         bot = BotEngine(speed_key=clean_speed, monitor_index=args.monitor)
-        app = PixelUI(bot)
+        app = PixelRetroUI(bot)
         app.run()
 
 
