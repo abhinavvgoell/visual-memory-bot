@@ -10,7 +10,9 @@ Features:
 - Dynamic Press Start 2P arcade font loading
 - CRT Recessed Screen with live status and telemetry (Rounds, Tiles, Time)
 - Live on-the-fly 4-Speed calibration (Slow, Medium, Fast, Blitz)
-- 8-bit toggle for Auto-Restart (New Game)
+- Dual Restart Support: Auto-detects and clicks both:
+    1) "NEW MINDSNAP" (Red/Coral button on Aborted/Finished screens)
+    2) "NEW GAME" (Green button on Defeat/Victory screens)
 - Always-on-top draggable retro arcade overlay
 - Headless CLI option: python main.py --cli
 =============================================================================
@@ -49,14 +51,22 @@ if os.path.exists(FONT_FILE) and sys.platform == "win32":
 PIXEL_FONT_NAME = "Press Start 2P" if HAS_PIXEL_FONT else "Consolas"
 
 # ----------------- COLOR CONSTANTS (HSV) -----------------
+# 1. Lit Tiles (Cyan & White)
 LOWER_CYAN = np.array([75, 50, 120])
 UPPER_CYAN = np.array([105, 255, 255])
 
 LOWER_WHITE = np.array([0, 0, 200])
 UPPER_WHITE = np.array([180, 45, 255])
 
+# 2. Green "NEW GAME" button border
 LOWER_GREEN = np.array([35, 60, 80])
 UPPER_GREEN = np.array([85, 255, 255])
+
+# 3. Red / Coral "NEW MINDSNAP" button
+LOWER_RED1 = np.array([0, 90, 110])
+UPPER_RED1 = np.array([12, 255, 255])
+LOWER_RED2 = np.array([170, 90, 110])
+UPPER_RED2 = np.array([180, 255, 255])
 
 # ----------------- 4 SPEED CONFIGS -----------------
 SPEED_PROFILES = {
@@ -126,6 +136,7 @@ class BotEngine:
         self.last_action_time = 0.0
         self.click_cooldown_until = 0.0
         self.new_game_timer = None
+        self.detected_button_type = None
         self.total_rounds = 0
         self.total_tiles = 0
 
@@ -222,24 +233,28 @@ class BotEngine:
                     if self.on_status:
                         self.on_status(f"WON #{self.total_rounds:02d} ({dur_ms:.0f}ms)", "#39ff14")
 
-                # --- AUTO NEW GAME CHECK ---
+                # --- AUTO-RESTART: "NEW MINDSNAP" / "NEW GAME" DETECTION ---
                 if self.auto_new_game and self.state == 0 and len(active_tiles) == 0:
-                    ng_pos = self._detect_new_game(frame)
-                    if ng_pos:
+                    restart_btn = self._detect_restart_button(frame)
+                    if restart_btn:
+                        btn_x, btn_y, btn_name = restart_btn
                         if self.new_game_timer is None:
                             self.new_game_timer = now
+                            self.detected_button_type = btn_name
                             if self.on_status:
-                                self.on_status("NEW GAME IN 1.5s", "#ffe600")
+                                self.on_status(f"{btn_name} IN 1.2s", "#ffe600")
 
-                        if now - self.new_game_timer >= 1.5:
-                            gx, gy = mon_left + ng_pos[0], mon_top + ng_pos[1]
+                        if now - self.new_game_timer >= 1.2:
+                            gx, gy = mon_left + btn_x, mon_top + btn_y
                             pyautogui.click(gx, gy)
                             time.sleep(1.5)
                             self.new_game_timer = None
+                            self.detected_button_type = None
                             if self.on_status:
                                 self.on_status("SEARCHING", "#00ffcc")
                     else:
                         self.new_game_timer = None
+                        self.detected_button_type = None
 
                 time.sleep(0.003)
 
@@ -264,19 +279,52 @@ class BotEngine:
                     tiles.append((x1 + bx + bw // 2, y1 + by + bh // 2))
         return tiles
 
-    def _detect_new_game(self, frame):
+    def _detect_restart_button(self, frame):
+        """
+        Detects both:
+        1. Red / Coral '▶ NEW MINDSNAP' button (on Aborted/Result screen)
+        2. Green 'NEW GAME' button (on Defeat/Victory summary screen)
+        Returns (center_x, center_y, button_label) or None.
+        """
         h, w = frame.shape[:2]
+        # Restart buttons always reside in the lower half of the screen
         roi = frame[int(h * 0.40):, :]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Mask 1: Green button
+        mask_green = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
+
+        # Mask 2: Red/Coral button (NEW MINDSNAP)
+        m1 = cv2.inRange(hsv, LOWER_RED1, UPPER_RED1)
+        m2 = cv2.inRange(hsv, LOWER_RED2, UPPER_RED2)
+        mask_red = cv2.bitwise_or(m1, m2)
+
+        combined_mask = cv2.bitwise_or(mask_green, mask_red)
+        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidates = []
         for cnt in contours:
-            if cv2.contourArea(cnt) > 1000:
+            area = cv2.contourArea(cnt)
+            if area > 350:  # Valid button size
                 bx, by, bw, bh = cv2.boundingRect(cnt)
                 ratio = bw / float(bh) if bh > 0 else 0
-                if 2.0 <= ratio <= 8.0 and bw > 150:
-                    return (bx + bw // 2, int(h * 0.40) + by + bh // 2)
+                # Must be a wide rectangular button
+                if 2.0 <= ratio <= 9.0 and bw > 60:
+                    cx = bx + bw // 2
+                    cy = int(h * 0.40) + by + bh // 2
+
+                    # Identify button type based on color dominance
+                    red_pixels = np.count_nonzero(mask_red[by:by+bh, bx:bx+bw])
+                    btn_type = "NEW MINDSNAP" if red_pixels > (area * 0.35) else "NEW GAME"
+
+                    candidates.append((cx, cy, area, btn_type))
+
+        if candidates:
+            # Pick largest candidate by area
+            candidates.sort(key=lambda c: c[2], reverse=True)
+            best = candidates[0]
+            return (best[0], best[1], best[3])
+
         return None
 
 
@@ -284,10 +332,6 @@ class BotEngine:
 # AUTHENTIC 8-BIT RETRO PIXEL CANVAS BUTTON
 # =============================================================================
 class PixelButton(tk.Canvas):
-    """
-    Genuine 8-bit beveled pixel button with stepped corners,
-    chunky 3D highlights, hover glow, and tactile 2px click depression.
-    """
     def __init__(
         self, parent, text, command=None, width=150, height=36,
         bg_color="#181c2b", fg_color="#ffffff",
@@ -337,11 +381,10 @@ class PixelButton(tk.Canvas):
         self.delete("all")
         offset = 2 if self.is_pressed else 0
 
-        # Outer Stepped 8-Bit Pixel Silhouette (missing 2px corner pixels)
+        # Outer Stepped 8-Bit Pixel Silhouette
         self.create_rectangle(2, 0, self.w - 2, self.h, fill="#000000", width=0)
         self.create_rectangle(0, 2, self.w, self.h - 2, fill="#000000", width=0)
 
-        # If active, glow border
         border_top = self.highlight_color if self.is_active and self.highlight_color else (
             self.border_dark if self.is_pressed else self.border_light
         )
@@ -349,21 +392,15 @@ class PixelButton(tk.Canvas):
             self.border_light if self.is_pressed else self.border_dark
         )
 
-        # Inner Button Face
         face_bg = self.bg_color
         self.create_rectangle(2, 2, self.w - 2, self.h - 2, fill=face_bg, width=0)
 
-        # 3D Pixel Bevel Lines (2px thick)
-        # Top line
+        # 3D Pixel Bevel Lines
         self.create_line(2, 2, self.w - 2, 2, fill=border_top, width=2)
-        # Left line
         self.create_line(2, 2, 2, self.h - 2, fill=border_top, width=2)
-        # Right shadow
         self.create_line(self.w - 3, 3, self.w - 3, self.h - 2, fill=border_bot, width=2)
-        # Bottom shadow
         self.create_line(3, self.h - 3, self.w - 2, self.h - 3, fill=border_bot, width=2)
 
-        # Center Text (Shifts 2px when pressed down)
         font_spec = (PIXEL_FONT_NAME, self.font_size, "bold") if not HAS_PIXEL_FONT else (PIXEL_FONT_NAME, self.font_size)
         self.create_text(
             self.w // 2 + offset, self.h // 2 + offset,
@@ -393,16 +430,15 @@ class PixelButton(tk.Canvas):
 # RETRO PIXEL UI (Authentic 8-Bit Arcade Cyber Aesthetic)
 # =============================================================================
 class PixelRetroUI:
-    # 8-Bit Cyber Arcade Palette
-    BG_MAIN = "#0a0b12"      # Pitch Black Arcade Cabinet
-    BG_PANEL = "#121524"     # Dark Pixel Slate
-    BG_CRT = "#050d0a"       # CRT Phosphor Terminal Green/Black
-    C_CYAN = "#00ffcc"       # Cyber Neon Cyan
-    C_GREEN = "#00ff66"      # Phosphor Neon Green
-    C_PINK = "#ff0055"       # Hot Arcade Pink
-    C_YELLOW = "#ffe600"     # Arcade Warning Yellow
-    C_WHITE = "#ffffff"      # Crisp Pixel White
-    C_MUTED = "#4e5773"      # Dim Pixel Shadow
+    BG_MAIN = "#0a0b12"
+    BG_PANEL = "#121524"
+    BG_CRT = "#050d0a"
+    C_CYAN = "#00ffcc"
+    C_GREEN = "#00ff66"
+    C_PINK = "#ff0055"
+    C_YELLOW = "#ffe600"
+    C_WHITE = "#ffffff"
+    C_MUTED = "#4e5773"
 
     def __init__(self, bot):
         self.bot = bot
@@ -411,15 +447,11 @@ class PixelRetroUI:
         self.root.geometry("400x530")
         self.root.resizable(False, False)
         self.root.configure(bg=self.BG_MAIN)
-
-        # Always-on-top so it floats seamlessly above browser
         self.root.attributes("-topmost", True)
 
-        # Drag window tracking
         self._drag_x = 0
         self._drag_y = 0
 
-        # Hook bot callbacks
         self.bot.on_status = self.update_status_threadsafe
         self.bot.on_round_win = self.update_stats_threadsafe
 
@@ -427,11 +459,10 @@ class PixelRetroUI:
         self._build_ui()
 
     def _build_ui(self):
-        # 1. RETRO TITLE BAR (Beveled Header)
+        # 1. RETRO TITLE BAR
         title_canvas = tk.Canvas(self.root, width=380, height=36, bg=self.BG_MAIN, highlightthickness=0, bd=0)
         title_canvas.pack(fill=tk.X, padx=10, pady=(10, 6))
 
-        # 8-bit stepped bevel on title bar
         title_canvas.create_rectangle(2, 0, 378, 36, fill="#000", width=0)
         title_canvas.create_rectangle(0, 2, 380, 34, fill="#000", width=0)
         title_canvas.create_rectangle(2, 2, 378, 34, fill=self.BG_PANEL, width=0)
@@ -441,25 +472,21 @@ class PixelRetroUI:
         font_hdr = (PIXEL_FONT_NAME, 9) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 10, "bold")
         title_canvas.create_text(190, 18, text="■■ MATIKS // BOT_OS ■■", fill=self.C_CYAN, font=font_hdr)
 
-        # Make title draggable
         title_canvas.bind("<ButtonPress-1>", self._start_drag)
         title_canvas.bind("<B1-Motion>", self._on_drag)
 
-        # 2. RECESSED CRT SCREEN (Terminal Telemetry Display)
+        # 2. RECESSED CRT SCREEN
         crt_canvas = tk.Canvas(self.root, width=380, height=130, bg=self.BG_MAIN, highlightthickness=0, bd=0)
         crt_canvas.pack(fill=tk.X, padx=10, pady=4)
 
-        # Recessed 8-bit bezel (dark top/left shadow, light bottom/right highlight)
         crt_canvas.create_rectangle(2, 0, 378, 130, fill="#000000", width=0)
         crt_canvas.create_rectangle(0, 2, 380, 128, fill="#000000", width=0)
         crt_canvas.create_rectangle(2, 2, 378, 128, fill=self.BG_CRT, width=0)
-        # Inner shadow
         crt_canvas.create_line(2, 2, 378, 2, fill="#020504", width=2)
         crt_canvas.create_line(2, 2, 2, 128, fill="#020504", width=2)
         crt_canvas.create_line(377, 3, 377, 128, fill="#182c22", width=2)
         crt_canvas.create_line(3, 127, 378, 127, fill="#182c22", width=2)
 
-        # Scanlines simulation on CRT screen
         for y_line in range(6, 126, 4):
             crt_canvas.create_line(4, y_line, 376, y_line, fill="#030806", width=1)
 
@@ -469,12 +496,9 @@ class PixelRetroUI:
 
         crt_canvas.create_text(16, 20, text=">> SYS_READY // TELEMETRY", fill=self.C_MUTED, font=font_sys, anchor="w")
 
-        # Status text element
         self.crt_status_id = crt_canvas.create_text(
             16, 52, text="● [ STANDBY ]", fill=self.C_YELLOW, font=font_status, anchor="w"
         )
-
-        # Telemetry line
         self.crt_rounds_id = crt_canvas.create_text(
             16, 88, text="ROUNDS: 000    TILES: 000", fill=self.C_WHITE, font=font_stats, anchor="w"
         )
@@ -483,14 +507,13 @@ class PixelRetroUI:
         )
         self.crt_canvas = crt_canvas
 
-        # 3. SPEED CALIBRATION BOX (Pixel Frame)
+        # 3. SPEED CALIBRATION BOX
         cal_box = tk.Frame(self.root, bg=self.BG_MAIN)
         cal_box.pack(fill=tk.X, padx=10, pady=6)
 
         font_sub = (PIXEL_FONT_NAME, 7) if HAS_PIXEL_FONT else (PIXEL_FONT_NAME, 8, "bold")
         tk.Label(cal_box, text=">> CALIBRATE SPEED <<", font=font_sub, fg=self.C_CYAN, bg=self.BG_MAIN).pack(anchor="w", padx=2, pady=(0, 4))
 
-        # 2x2 Chunky Pixel Button Grid
         btn_grid = tk.Frame(cal_box, bg=self.BG_MAIN)
         btn_grid.pack(fill=tk.X)
 
@@ -514,7 +537,6 @@ class PixelRetroUI:
             btn_grid.columnconfigure(col, weight=1)
             self.speed_buttons[skey] = btn
 
-        # Speed Description
         self.lbl_speed_desc = tk.Label(
             cal_box,
             text=f"> {SPEED_PROFILES[self.bot.speed_key]['desc']}",
@@ -527,7 +549,7 @@ class PixelRetroUI:
 
         self._refresh_speed_buttons()
 
-        # 4. AUTO-RESTART TOGGLE (8-bit pixel switch)
+        # 4. AUTO-RESTART TOGGLE
         toggle_box = tk.Frame(self.root, bg=self.BG_MAIN)
         toggle_box.pack(fill=tk.X, padx=10, pady=(0, 6))
 
@@ -545,7 +567,7 @@ class PixelRetroUI:
         )
         self.btn_toggle_ng.pack(fill=tk.X)
 
-        # 5. MASTER ENGAGE / HALT BUTTON (Large Chunky Arcade Button)
+        # 5. MASTER ENGAGE / HALT BUTTON
         action_box = tk.Frame(self.root, bg=self.BG_MAIN)
         action_box.pack(fill=tk.X, padx=10, pady=(4, 6))
 
@@ -563,7 +585,7 @@ class PixelRetroUI:
         )
         self.btn_master.pack(fill=tk.X)
 
-        # 6. Bottom Failsafe Reminder
+        # 6. Bottom Failsafe
         tk.Label(
             self.root,
             text="EMERGENCY ABORT: SLIDE MOUSE TO CORNER",
@@ -592,7 +614,6 @@ class PixelRetroUI:
     def _refresh_speed_buttons(self):
         for skey, btn in self.speed_buttons.items():
             if skey == self.bot.speed_key:
-                # Active: Glowing Neon Cyan
                 btn.set_colors(
                     bg_color="#003830",
                     fg_color=self.C_CYAN,
@@ -601,7 +622,6 @@ class PixelRetroUI:
                 )
                 btn.set_active(True)
             else:
-                # Inactive: Dim 8-bit slate
                 btn.set_colors(
                     bg_color="#141828",
                     fg_color="#a8b2d1",
