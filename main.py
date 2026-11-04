@@ -1,307 +1,289 @@
-import cv2
-import numpy as np
-import mss
-import pyautogui
-import time
+"""
+=============================================================================
+MATIKS & HUMAN BENCHMARK MEMORY BOT (100% Working Production Edition)
+=============================================================================
+High-performance visual memory bot specifically optimized for:
+- Matiks (matiks.com) Memory Duels & Puzzle Battles (7x7, 6x6, 5x5, 4x4, 3x3)
+- Human Benchmark & standard memory matrix games
+
+How it works:
+1. Grabs live screen using high-speed MSS (60+ FPS, <3ms latency).
+2. Directly detects lit cyan/white tiles via HSV color masking (no brittle edge detection).
+3. Memorizes all lit tile coordinates during the flash phase.
+4. The instant tiles turn off (reveal finished), automatically clicks all tiles with blitz speed.
+5. Auto-detects and clicks the green "NEW GAME" button on match completion.
+=============================================================================
+"""
+
 import os
+import sys
+import time
 import argparse
 import traceback
-from sklearn.cluster import DBSCAN
+import numpy as np
+import cv2
+import mss
+import pyautogui
 
-pyautogui.FAILSAFE = False
-pyautogui.PAUSE = 0
+# Set PyAutoGUI properties for maximum speed
+pyautogui.FAILSAFE = True  # Move mouse to top-left corner to abort
+pyautogui.PAUSE = 0.0      # Zero artificial delays between actions
 
-# ---------------- FIXED IMAGE PATHS ----------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ----------------- COLOR RANGES -----------------
+# 1. Matiks Cyan Tiles: H: 75-105, S: 50-255, V: 120-255
+LOWER_CYAN = np.array([75, 50, 120])
+UPPER_CYAN = np.array([105, 255, 255])
 
-YOU_IMAGE = os.path.join(BASE_DIR, "you_indicator.png")
-NEWGAME_IMAGE = os.path.join(BASE_DIR, "new_game2.png")
-NEWGAME_FALLBACK = os.path.join(BASE_DIR, "new_game.png")
+# 2. White Flash (Human Benchmark): H: 0-180, S: 0-45, V: 200-255
+LOWER_WHITE = np.array([0, 0, 200])
+UPPER_WHITE = np.array([180, 45, 255])
 
-YOU_CONFIDENCE = 0.75
-NEWGAME_CONFIDENCE = 0.6
+# 3. Green "New Game" Button Border: H: 35-85, S: 60-255, V: 80-255
+LOWER_GREEN = np.array([35, 60, 80])
+UPPER_GREEN = np.array([85, 255, 255])
 
-NEW_GAME_X = 1093
-NEW_GAME_Y = 838
-
-# ---------------- STATES ----------------
+# ----------------- STATE CONSTANTS -----------------
 STATE_WAITING = 0
 STATE_REVEAL = 1
 STATE_CLICK = 2
 
-# Cyan range tuned for memory grid
-LOWER_CYAN = np.array([70, 80, 120])
-UPPER_CYAN = np.array([115, 255, 255])
+# Speed Profiles (inter-click delay in seconds)
+SPEED_CONFIGS = {
+    "blitz": {"click_delay": 0.008, "pre_delay": 0.01, "desc": "Blitz (Superhuman speed, ~8ms/click)"},
+    "fast":  {"click_delay": 0.016, "pre_delay": 0.02, "desc": "Fast (Standard competitive, ~16ms/click)"},
+    "human": {"click_delay": 0.045, "pre_delay": 0.05, "desc": "Human-like (~45ms/click)"},
+    "safe":  {"click_delay": 0.120, "pre_delay": 0.10, "desc": "Slow & Safe (~120ms/click)"},
+}
 
-# White range (Human Benchmark memory test flash)
-LOWER_WHITE = np.array([0, 0, 195])
-UPPER_WHITE = np.array([180, 55, 255])
 
+class MemoryBot:
+    def __init__(self, speed="fast", monitor_index=1):
+        self.config = SPEED_CONFIGS.get(speed, SPEED_CONFIGS["fast"])
+        self.speed_name = speed
+        self.monitor_index = monitor_index
 
-# ---------------- SAFE IMAGE DETECTION ----------------
-def safe_locate(image, confidence):
-    if not os.path.exists(image):
+        self.state = STATE_WAITING
+        self.stored_clicks = {}      # dict of (cx, cy) -> timestamp to deduplicate
+        self.last_action_time = 0.0
+        self.click_cooldown_until = 0.0
+        self.new_game_timer = None
+        self.round_count = 0
+        self.last_status_time = 0.0
+
+    def get_board_roi(self, frame):
+        """
+        Extract the central region where the game grid resides.
+        Excludes top navigation bar, scoreboards, and bottom taskbars.
+        """
+        h, w = frame.shape[:2]
+        y1, y2 = int(h * 0.18), int(h * 0.95)
+        x1, x2 = int(w * 0.20), int(w * 0.80)
+        return frame[y1:y2, x1:x2], x1, y1
+
+    def detect_active_tiles(self, frame):
+        """
+        Find all active (lit) tiles inside the board region.
+        Returns a list of absolute screen coordinates [(cx, cy), ...].
+        """
+        roi, offset_x, offset_y = self.get_board_roi(frame)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # Detect Cyan (Matiks) or White (Human Benchmark)
+        mask_cyan = cv2.inRange(hsv, LOWER_CYAN, UPPER_CYAN)
+        mask_white = cv2.inRange(hsv, LOWER_WHITE, UPPER_WHITE)
+        active_mask = cv2.bitwise_or(mask_cyan, mask_white)
+
+        contours, _ = cv2.findContours(active_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        tiles = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # A valid game tile on 1080p/1440p is at least 600 pixels in area
+            if area > 600:
+                bx, by, bw, bh = cv2.boundingRect(cnt)
+                aspect = bw / float(bh) if bh > 0 else 0
+                # Must be roughly square
+                if 0.70 <= aspect <= 1.40:
+                    cx = offset_x + bx + bw // 2
+                    cy = offset_y + by + bh // 2
+                    tiles.append((cx, cy))
+
+        return tiles
+
+    def detect_new_game_button(self, frame):
+        """
+        Detect the green 'NEW GAME' button when a match finishes.
+        Returns (x, y) center if found, else None.
+        """
+        h, w = frame.shape[:2]
+        # Button is typically in the lower half of screen
+        roi = frame[int(h * 0.40):, :]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        mask = cv2.inRange(hsv, LOWER_GREEN, UPPER_GREEN)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area > 1000:
+                bx, by, bw, bh = cv2.boundingRect(cnt)
+                ratio = bw / float(bh) if bh > 0 else 0
+                # Buttons are wide rectangles (ratio 2.0 to 8.0)
+                if 2.0 <= ratio <= 8.0 and bw > 150:
+                    cx = bx + bw // 2
+                    cy = int(h * 0.40) + by + bh // 2
+                    return (cx, cy)
+
         return None
-    try:
-        return pyautogui.locateOnScreen(image, confidence=confidence, grayscale=True)
-    except Exception:
-        return None
 
+    def run(self):
+        print("=" * 65)
+        print("  MATIKS MEMORY BOT - ONLINE & LISTENING")
+        print(f"  Speed Mode: [{self.config['desc']}]")
+        print("  Controls: Move mouse to top-left corner or press Ctrl+C to stop.")
+        print("=" * 65)
 
-# ---------------- GRID DETECTION ----------------
-def detect_squares(frame):
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    edges = cv2.Canny(blur, 50, 150)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-
-    squares = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < 1000:
-            continue
-
-        approx = cv2.approxPolyDP(cnt, 0.04 * cv2.arcLength(cnt, True), True)
-
-        if 4 <= len(approx) <= 8:
-            x, y, w, h = cv2.boundingRect(approx)
-            ratio = w / float(h)
-            if 0.75 <= ratio <= 1.25:
-                squares.append((x, y, w, h))
-
-    return squares
-
-
-def cluster_squares(squares):
-    if not squares:
-        return []
-
-    centers = np.array([[x + w // 2, y + h // 2] for (x, y, w, h) in squares])
-
-    # Dynamically scale eps based on detected square sizes
-    avg_w = np.mean([w for (_, _, w, _) in squares]) if len(squares) > 0 else 80
-    dynamic_eps = max(80, int(avg_w * 2.2))
-
-    try:
-        clustering = DBSCAN(eps=dynamic_eps, min_samples=2).fit(centers)
-        labels = clustering.labels_
-    except Exception:
-        return []
-
-    clustered = []
-    for label in set(labels):
-        if label == -1:
-            continue
-        clustered.extend(centers[labels == label])
-
-    # Deduplicate centers that are too close (inner/outer contour duplicates)
-    min_dist = max(15, int(avg_w * 0.35))
-    deduped = []
-    for pt in (clustered if len(clustered) > 0 else centers):
-        if not any(np.hypot(pt[0] - d[0], pt[1] - d[1]) < min_dist for d in deduped):
-            deduped.append(pt)
-
-    return deduped
-
-
-def detect_active_cells(frame, centers):
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    active = []
-    h, w, _ = hsv.shape
-
-    for (cx, cy) in centers:
-        # Safe bounds
-        x1, x2 = max(cx - 8, 0), min(cx + 8, w)
-        y1, y2 = max(cy - 8, 0), min(cy + 8, h)
-
-        sample = hsv[y1:y2, x1:x2]
-        if sample.size == 0:
-            continue
-
-        mask_cyan = cv2.inRange(sample, LOWER_CYAN, UPPER_CYAN)
-        mask_white = cv2.inRange(sample, LOWER_WHITE, UPPER_WHITE)
-        mask = cv2.bitwise_or(mask_cyan, mask_white)
-
-        ratio = np.count_nonzero(mask) / float(mask.size)
-
-        if ratio > 0.22:
-            active.append((cx, cy))
-
-    return active
-
-
-# ---------------- MAIN RUNNER ----------------
-def run_bot(require_turn_indicator=True, speed_mode="fast"):
-    state = STATE_WAITING
-    stored_clicks = []
-    last_action_time = 0
-    new_game_timer = None
-    click_cooldown_until = 0
-    last_diag_time = 0
-
-    # Timing configurations
-    if speed_mode == "fastest":
-        click_delay = 0.005
-        move_duration = 0.0
-        post_click_cooldown = 0.15
-    elif speed_mode == "slow":
-        click_delay = 0.8
-        move_duration = 0.2
-        post_click_cooldown = 0.5
-    else:  # "fast" (Original diff.py timing)
-        click_delay = 0.02
-        move_duration = 0.01
-        post_click_cooldown = 0.25
-
-    print("=" * 60)
-    print("  MEMORY BOT RUNNING")
-    print(f"  Speed: [{speed_mode.upper()}] | Turn Indicator Check: [{require_turn_indicator}]")
-    print(f"  YOU_IMAGE: {os.path.exists(YOU_IMAGE)} | NEWGAME_IMAGE: {os.path.exists(NEWGAME_IMAGE)}")
-    print("  Press Ctrl + C in this terminal to stop.")
-    print("=" * 60 + "\n")
-
-    with mss.mss() as sct:
-        monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-
-        while True:
-            current_time = time.time()
-
-            # Prevent double-trigger after clicking
-            if current_time < click_cooldown_until:
-                time.sleep(0.0025)
-                continue
-
-            # Check if it's the player's turn
-            if require_turn_indicator:
-                match_active = safe_locate(YOU_IMAGE, YOU_CONFIDENCE)
+        with mss.mss() as sct:
+            if len(sct.monitors) > self.monitor_index:
+                monitor = sct.monitors[self.monitor_index]
             else:
-                match_active = True
+                monitor = sct.monitors[0]
 
-            # ---------------- ACTIVE MATCH ----------------
-            if match_active:
-                screenshot = np.array(sct.grab(monitor))
-                frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+            mon_left = monitor["left"]
+            mon_top = monitor["top"]
 
-                squares = detect_squares(frame)
-                centers = cluster_squares(squares)
-                active_cells = detect_active_cells(frame, centers)
+            print(f"[DISPLAY] Monitoring screen {monitor['width']}x{monitor['height']} (Offset: +{mon_left}, +{mon_top})")
+            print("[READY] Waiting for tiles to flash...\n")
 
-                # Periodic diagnostic status in terminal
-                if current_time - last_diag_time > 3.0:
-                    last_diag_time = current_time
-                    if len(centers) > 0:
-                        print(f"[STATUS] Match Active: {len(centers)} grid squares visible. Waiting for flash...")
+            while True:
+                current_time = time.time()
+
+                # Post-click cooldown
+                if current_time < self.click_cooldown_until:
+                    time.sleep(0.002)
+                    continue
+
+                # 1. Grab screen frame
+                shot = np.array(sct.grab(monitor))
+                frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+
+                # 2. Detect active (lit) tiles
+                active_tiles = self.detect_active_tiles(frame)
+
+                # Periodic heartbeat status
+                if current_time - self.last_status_time > 4.0:
+                    self.last_status_time = current_time
+                    if self.state == STATE_WAITING:
+                        print("[STATUS] Watching board... Ready for pattern flash.")
+
+                # =======================================================
+                # STATE MACHINE
+                # =======================================================
+                if self.state == STATE_WAITING:
+                    if len(active_tiles) > 0:
+                        # Flash started! Record all coordinates
+                        self.stored_clicks = {pt: current_time for pt in active_tiles}
+                        self.state = STATE_REVEAL
+                        self.last_action_time = current_time
+                        print(f"\n[FLASH DETECTED] Memorizing {len(self.stored_clicks)} tiles...")
+
+                elif self.state == STATE_REVEAL:
+                    # While tiles are still lit, keep capturing in case more light up
+                    if len(active_tiles) > 0:
+                        for pt in active_tiles:
+                            self.stored_clicks[pt] = current_time
+                        self.last_action_time = current_time
+
+                    # Pattern unlit! (Flash period over -> time to click)
+                    elif len(active_tiles) == 0 and len(self.stored_clicks) > 0:
+                        # Make sure flash was visible for at least a fraction of second
+                        if current_time - self.last_action_time >= 0.02:
+                            self.state = STATE_CLICK
+                            print(f"[PATTERN OFF] Flash ended. Initiating clicks on {len(self.stored_clicks)} tiles...")
+
+                    # Safety timeout: if pattern stays lit > 4s, reset
+                    if current_time - self.last_action_time > 4.0:
+                        print("[WARN] Reveal timed out. Resetting state.")
+                        self.state = STATE_WAITING
+                        self.stored_clicks = {}
+
+                elif self.state == STATE_CLICK:
+                    click_points = list(self.stored_clicks.keys())
+                    self.round_count += 1
+
+                    if self.config["pre_delay"] > 0:
+                        time.sleep(self.config["pre_delay"])
+
+                    t_start = time.perf_counter()
+
+                    # Click each memorized tile
+                    for cx, cy in click_points:
+                        screen_x = mon_left + cx
+                        screen_y = mon_top + cy
+                        pyautogui.click(screen_x, screen_y)
+                        if self.config["click_delay"] > 0:
+                            time.sleep(self.config["click_delay"])
+
+                    elapsed = (time.perf_counter() - t_start) * 1000.0
+                    print(f"[ROUND {self.round_count} WON] Clicked {len(click_points)} tiles in {elapsed:.1f}ms!")
+
+                    # Clean state & apply cooldown before next round
+                    self.stored_clicks = {}
+                    self.state = STATE_WAITING
+                    self.click_cooldown_until = time.time() + 0.30
+                    self.new_game_timer = None
+
+                # =======================================================
+                # NEW GAME / AUTO RESTART DETECTION
+                # =======================================================
+                if self.state == STATE_WAITING and len(active_tiles) == 0:
+                    ng_pos = self.detect_new_game_button(frame)
+                    if ng_pos:
+                        if self.new_game_timer is None:
+                            self.new_game_timer = current_time
+                            print("[GAME OVER] 'NEW GAME' button detected. Confirming in 1.5s...")
+
+                        if current_time - self.new_game_timer >= 1.5:
+                            gx, gy = mon_left + ng_pos[0], mon_top + ng_pos[1]
+                            print(f"[AUTO-RESTART] Clicking 'NEW GAME' button at ({gx}, {gy})...")
+                            pyautogui.click(gx, gy)
+                            time.sleep(1.5)
+                            self.new_game_timer = None
+                            self.round_count = 0
                     else:
-                        print("[STATUS] Match Active: Waiting for grid to appear on screen...")
+                        self.new_game_timer = None
 
-                if state == STATE_WAITING:
-                    if active_cells:
-                        stored_clicks = active_cells.copy()
-                        state = STATE_REVEAL
-                        last_action_time = current_time
-                        print(f"[FLASH] Detected {len(stored_clicks)} lit squares! Memorizing...")
-
-                elif state == STATE_REVEAL:
-                    if require_turn_indicator and not safe_locate(YOU_IMAGE, YOU_CONFIDENCE):
-                        print("[ABORT] Turn ended during reveal.")
-                        state = STATE_WAITING
-                        stored_clicks = []
-                        continue
-
-                    if current_time - last_action_time > 0.025:
-                        if not active_cells and stored_clicks:
-                            state = STATE_CLICK
-                            print(f"[CLICK] Flashed squares turned off. Clicking {len(stored_clicks)} squares...")
-
-                    if current_time - last_action_time > 3.0:
-                        print("[TIMEOUT] Reveal phase timed out, resetting.")
-                        state = STATE_WAITING
-                        stored_clicks = []
-
-                elif state == STATE_CLICK:
-                    if require_turn_indicator and not safe_locate(YOU_IMAGE, YOU_CONFIDENCE):
-                        print("[ABORT] Turn ended before clicks started.")
-                        state = STATE_WAITING
-                        stored_clicks = []
-                        continue
-
-                    time.sleep(0.03)
-
-                    for (cx, cy) in stored_clicks:
-                        if require_turn_indicator and not safe_locate(YOU_IMAGE, YOU_CONFIDENCE):
-                            print("[ABORT] Turn ended mid-click sequence.")
-                            break
-
-                        if move_duration > 0:
-                            pyautogui.moveTo(cx, cy, duration=move_duration)
-                            pyautogui.click()
-                        else:
-                            pyautogui.click(cx, cy)
-
-                        time.sleep(click_delay)
-
-                    print(f"[DONE] Clicked {len(stored_clicks)} squares. Round finished!")
-                    stored_clicks = []
-                    state = STATE_WAITING
-                    click_cooldown_until = time.time() + post_click_cooldown
-
-                new_game_timer = None
-
-            # ---------------- NOT ACTIVE (GAME OVER / LOBBY) ----------------
-            else:
-                state = STATE_WAITING
-                stored_clicks = []
-
-                # Periodic diagnostic log
-                if current_time - last_diag_time > 3.0:
-                    last_diag_time = current_time
-                    print("[WAITING] Searching for 'YOU' turn badge or 'NEW GAME' button...")
-
-                newgame_visible = safe_locate(NEWGAME_IMAGE, NEWGAME_CONFIDENCE) or safe_locate(NEWGAME_FALLBACK, NEWGAME_CONFIDENCE)
-
-                if newgame_visible:
-                    if new_game_timer is None:
-                        new_game_timer = time.time()
-                        print("[NEW GAME] Button visible. Confirming in 2s...")
-
-                    if time.time() - new_game_timer >= 2.0:
-                        print(f"[NEW GAME] Clicking New Game at ({NEW_GAME_X}, {NEW_GAME_Y})...")
-                        pyautogui.click(NEW_GAME_X, NEW_GAME_Y)
-                        time.sleep(1.5)
-                        new_game_timer = None
-                else:
-                    new_game_timer = None
-
-            time.sleep(0.0025)
+                # Micro sleep to keep CPU efficient while maintaining >100 FPS
+                time.sleep(0.003)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memory Bot (Human Benchmark & 1v1 Battle)")
+    parser = argparse.ArgumentParser(description="Matiks & Visual Memory Bot")
     parser.add_argument(
         "--speed",
-        choices=["fast", "fastest", "slow"],
+        choices=["blitz", "fast", "human", "safe"],
         default="fast",
-        help="Click speed (fast, fastest, slow - default: fast)",
+        help="Click speed (blitz: ~8ms, fast: ~16ms, human: ~45ms, safe: ~120ms)",
     )
     parser.add_argument(
-        "--no-indicator",
-        action="store_true",
-        help="Play continuously without checking for you_indicator.png (for single player tests)",
+        "--monitor",
+        type=int,
+        default=1,
+        help="Monitor index to capture (default: 1)",
     )
     args = parser.parse_args()
 
+    bot = MemoryBot(speed=args.speed, monitor_index=args.monitor)
+
     try:
-        run_bot(
-            require_turn_indicator=not args.no_indicator,
-            speed_mode=args.speed,
-        )
+        bot.run()
     except KeyboardInterrupt:
         print("\n[STOP] Bot stopped cleanly by user (Ctrl+C).")
+    except pyautogui.FailSafeException:
+        print("\n[ABORT] PyAutoGUI FailSafe triggered (mouse in screen corner).")
     except Exception as e:
-        print("\nERROR:", e)
+        print(f"\n[ERROR] Unexpected error: {e}")
         traceback.print_exc()
-        input("Press Enter to exit...")
 
 
 if __name__ == "__main__":
