@@ -40,7 +40,7 @@ pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.0
 
 # ----------------- BASE PATHS & FONT REGISTRATION -----------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 FONT_FILE = os.path.join(BASE_DIR, "PressStart2P.ttf")
 
 # Register 8-bit pixel font dynamically at runtime in Windows GDI
