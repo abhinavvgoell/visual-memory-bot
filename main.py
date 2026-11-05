@@ -119,7 +119,7 @@ SPEED_ALIASES = {
 # BOT CORE ENGINE
 # =============================================================================
 class BotEngine:
-    def __init__(self, speed_key="fast", monitor_index=1, on_status=None, on_round_win=None):
+    def __init__(self, speed_key="fast", monitor_index=1, on_status=None, on_round_win=None, on_failsafe=None):
         self.speed_key = speed_key
         self.speed_cfg = SPEED_PROFILES[self.speed_key]
         self.monitor_index = monitor_index
@@ -127,6 +127,7 @@ class BotEngine:
 
         self.on_status = on_status
         self.on_round_win = on_round_win
+        self.on_failsafe = on_failsafe
 
         self.is_running = False
         self.thread = None
@@ -152,11 +153,19 @@ class BotEngine:
         if self.is_running:
             return
         self.is_running = True
+        self.state = 0
+        self.stored_clicks = {}
+        self.new_game_timer = None
+        self.detected_button_type = None
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
     def stop(self):
         self.is_running = False
+        self.state = 0
+        self.stored_clicks = {}
+        self.new_game_timer = None
+        self.detected_button_type = None
         if self.on_status:
             self.on_status("STANDBY", "#ffe600")
 
@@ -164,99 +173,123 @@ class BotEngine:
         if self.on_status:
             self.on_status("SEARCHING", "#00ffcc")
 
-        with mss.mss() as sct:
-            monitor = sct.monitors[self.monitor_index] if len(sct.monitors) > self.monitor_index else sct.monitors[0]
-            mon_left = monitor["left"]
-            mon_top = monitor["top"]
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[self.monitor_index] if len(sct.monitors) > self.monitor_index else sct.monitors[0]
+                mon_left = monitor["left"]
+                mon_top = monitor["top"]
 
-            while self.is_running:
-                now = time.time()
+                while self.is_running:
+                    now = time.time()
 
-                if now < self.click_cooldown_until:
-                    time.sleep(0.002)
-                    continue
+                    if now < self.click_cooldown_until:
+                        time.sleep(0.002)
+                        continue
 
-                shot = np.array(sct.grab(monitor))
-                frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
-                active_tiles = self._detect_active_tiles(frame)
+                    shot = np.array(sct.grab(monitor))
+                    frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+                    active_tiles = self._detect_active_tiles(frame)
 
-                # --- STATE MACHINE ---
-                if self.state == 0:  # WAITING
-                    if len(active_tiles) > 0:
-                        self.stored_clicks = {pt: now for pt in active_tiles}
-                        self.state = 1
-                        self.last_action_time = now
-                        if self.on_status:
-                            self.on_status(f"MEMORIZING [{len(self.stored_clicks)}]", "#ff007f")
-
-                elif self.state == 1:  # REVEAL
-                    if len(active_tiles) > 0:
-                        for pt in active_tiles:
-                            self.stored_clicks[pt] = now
-                        self.last_action_time = now
-                    elif len(active_tiles) == 0 and len(self.stored_clicks) > 0:
-                        if now - self.last_action_time >= 0.02:
-                            self.state = 2
+                    # --- STATE MACHINE ---
+                    if self.state == 0:  # WAITING
+                        if len(active_tiles) > 0:
+                            self.stored_clicks = {pt: now for pt in active_tiles}
+                            self.state = 1
+                            self.last_action_time = now
                             if self.on_status:
-                                self.on_status(f"BLITZING [{len(self.stored_clicks)}]", "#39ff14")
+                                self.on_status(f"MEMORIZING [{len(self.stored_clicks)}]", "#ff007f")
 
-                    if now - self.last_action_time > 4.0:
-                        self.state = 0
-                        self.stored_clicks = {}
-                        if self.on_status:
-                            self.on_status("SEARCHING", "#00ffcc")
+                    elif self.state == 1:  # REVEAL
+                        if len(active_tiles) > 0:
+                            for pt in active_tiles:
+                                self.stored_clicks[pt] = now
+                            self.last_action_time = now
+                        elif len(active_tiles) == 0 and len(self.stored_clicks) > 0:
+                            if now - self.last_action_time >= 0.02:
+                                self.state = 2
+                                if self.on_status:
+                                    self.on_status(f"BLITZING [{len(self.stored_clicks)}]", "#39ff14")
 
-                elif self.state == 2:  # CLICK
-                    points = list(self.stored_clicks.keys())
-                    n_tiles = len(points)
-                    self.total_rounds += 1
-                    self.total_tiles += n_tiles
-
-                    if self.speed_cfg["pre_delay"] > 0:
-                        time.sleep(self.speed_cfg["pre_delay"])
-
-                    t0 = time.perf_counter()
-                    for cx, cy in points:
-                        if not self.is_running:
-                            break
-                        pyautogui.click(mon_left + cx, mon_top + cy)
-                        if self.speed_cfg["click_delay"] > 0:
-                            time.sleep(self.speed_cfg["click_delay"])
-                    dur_ms = (time.perf_counter() - t0) * 1000.0
-
-                    if self.on_round_win:
-                        self.on_round_win(self.total_rounds, self.total_tiles, dur_ms)
-
-                    self.stored_clicks = {}
-                    self.state = 0
-                    self.click_cooldown_until = time.time() + 0.30
-                    if self.on_status:
-                        self.on_status(f"WON #{self.total_rounds:02d} ({dur_ms:.0f}ms)", "#39ff14")
-
-                # --- AUTO-RESTART: "NEW MINDSNAP" / "NEW GAME" DETECTION ---
-                if self.auto_new_game and self.state == 0 and len(active_tiles) == 0:
-                    restart_btn = self._detect_restart_button(frame)
-                    if restart_btn:
-                        btn_x, btn_y, btn_name = restart_btn
-                        if self.new_game_timer is None:
-                            self.new_game_timer = now
-                            self.detected_button_type = btn_name
-                            if self.on_status:
-                                self.on_status(f"{btn_name} IN 1.2s", "#ffe600")
-
-                        if now - self.new_game_timer >= 1.2:
-                            gx, gy = mon_left + btn_x, mon_top + btn_y
-                            pyautogui.click(gx, gy)
-                            time.sleep(1.5)
-                            self.new_game_timer = None
-                            self.detected_button_type = None
+                        if now - self.last_action_time > 4.0:
+                            self.state = 0
+                            self.stored_clicks = {}
                             if self.on_status:
                                 self.on_status("SEARCHING", "#00ffcc")
-                    else:
-                        self.new_game_timer = None
-                        self.detected_button_type = None
 
-                time.sleep(0.003)
+                    elif self.state == 2:  # CLICK
+                        points = list(self.stored_clicks.keys())
+                        n_tiles = len(points)
+                        self.total_rounds += 1
+                        self.total_tiles += n_tiles
+
+                        if self.speed_cfg["pre_delay"] > 0:
+                            time.sleep(self.speed_cfg["pre_delay"])
+
+                        t0 = time.perf_counter()
+                        for cx, cy in points:
+                            if not self.is_running:
+                                break
+                            pyautogui.click(mon_left + cx, mon_top + cy)
+                            if self.speed_cfg["click_delay"] > 0:
+                                time.sleep(self.speed_cfg["click_delay"])
+                        dur_ms = (time.perf_counter() - t0) * 1000.0
+
+                        if self.on_round_win:
+                            self.on_round_win(self.total_rounds, self.total_tiles, dur_ms)
+
+                        self.stored_clicks = {}
+                        self.state = 0
+                        self.click_cooldown_until = time.time() + 0.30
+                        if self.on_status:
+                            self.on_status(f"WON #{self.total_rounds:02d} ({dur_ms:.0f}ms)", "#39ff14")
+
+                    # --- AUTO-RESTART: "NEW MINDSNAP" / "NEW GAME" DETECTION ---
+                    if self.auto_new_game and self.state == 0 and len(active_tiles) == 0:
+                        restart_btn = self._detect_restart_button(frame)
+                        if restart_btn:
+                            btn_x, btn_y, btn_name = restart_btn
+                            if self.new_game_timer is None:
+                                self.new_game_timer = now
+                                self.detected_button_type = btn_name
+                                if self.on_status:
+                                    self.on_status(f"{btn_name} IN 1.2s", "#ffe600")
+
+                            if now - self.new_game_timer >= 1.2:
+                                gx, gy = mon_left + btn_x, mon_top + btn_y
+                                pyautogui.click(gx, gy)
+                                time.sleep(1.5)
+                                self.new_game_timer = None
+                                self.detected_button_type = None
+                                if self.on_status:
+                                    self.on_status("SEARCHING", "#00ffcc")
+                        else:
+                            self.new_game_timer = None
+                            self.detected_button_type = None
+
+                    time.sleep(0.003)
+
+        except pyautogui.FailSafeException:
+            # Clean emergency abort when mouse slides to corner
+            self.is_running = False
+            self.state = 0
+            self.stored_clicks = {}
+            self.new_game_timer = None
+            self.detected_button_type = None
+            if self.on_status:
+                self.on_status("ABORTED (CORNER)", "#ffaa00")
+            if self.on_failsafe:
+                self.on_failsafe()
+        except Exception as e:
+            self.is_running = False
+            self.state = 0
+            self.stored_clicks = {}
+            self.new_game_timer = None
+            if self.on_status:
+                self.on_status("ERROR", "#ff0055")
+            print(f"[BOT LOOP ERROR]: {e}")
+            traceback.print_exc()
+        finally:
+            self.is_running = False
 
     def _detect_active_tiles(self, frame):
         h, w = frame.shape[:2]
@@ -454,6 +487,7 @@ class PixelRetroUI:
 
         self.bot.on_status = self.update_status_threadsafe
         self.bot.on_round_win = self.update_stats_threadsafe
+        self.bot.on_failsafe = self.handle_failsafe_threadsafe
 
         self.speed_buttons = {}
         self._build_ui()
@@ -669,6 +703,17 @@ class PixelRetroUI:
         def _update():
             self.crt_canvas.itemconfig(self.crt_rounds_id, text=f"ROUNDS: {rounds:03d}    TILES: {tiles:03d}")
             self.crt_canvas.itemconfig(self.crt_speed_id, text=f"LAST TIME: {last_ms:.1f} MS")
+        self.root.after(0, _update)
+
+    def handle_failsafe_threadsafe(self):
+        def _update():
+            self.btn_master.set_text("▶ ENGAGE BOT")
+            self.btn_master.set_colors(
+                bg_color="#00a843",
+                fg_color="#000000",
+                border_light=self.C_GREEN,
+                border_dark="#004d1f",
+            )
         self.root.after(0, _update)
 
     def run(self):
