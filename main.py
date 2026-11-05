@@ -13,6 +13,10 @@ Features:
 - Dual Restart Support: Auto-detects and clicks both:
     1) "NEW MINDSNAP" (Red/Coral button on Aborted/Finished screens)
     2) "NEW GAME" (Green button on Defeat/Victory screens)
+- Failsafe & Hotkey Pause/Resume:
+    1) [F6] Global hotkey toggle to instantly Pause/Engage anywhere
+    2) Slide mouse to any screen corner to cleanly emergency-pause
+    3) Instant, seamless re-engaging without thread locks or crash exceptions
 - Always-on-top draggable retro arcade overlay
 - Headless CLI option: python main.py --cli
 =============================================================================
@@ -31,8 +35,8 @@ import mss
 import pyautogui
 import tkinter as tk
 
-# Disable PyAutoGUI artificial delays for pure speed
-pyautogui.FAILSAFE = True  # Move mouse to top-left corner to abort
+# Disable PyAutoGUI crash-failsafe so our custom arming & corner logic handles pause cleanly
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.0
 
 # ----------------- BASE PATHS & FONT REGISTRATION -----------------
@@ -131,6 +135,7 @@ class BotEngine:
 
         self.is_running = False
         self.thread = None
+        self.corner_armed = False
 
         self.stored_clicks = {}
         self.state = 0  # 0: WAITING, 1: REVEAL, 2: CLICK
@@ -150,9 +155,16 @@ class BotEngine:
         self.auto_new_game = enabled
 
     def start(self):
-        if self.is_running:
-            return
+        # Join any prior thread to prevent concurrency collisions
+        if self.thread and self.thread.is_alive():
+            self.is_running = False
+            try:
+                self.thread.join(timeout=0.6)
+            except Exception:
+                pass
+
         self.is_running = True
+        self.corner_armed = False  # Arm only once cursor confirmed away from corners
         self.state = 0
         self.stored_clicks = {}
         self.new_game_timer = None
@@ -162,6 +174,12 @@ class BotEngine:
 
     def stop(self):
         self.is_running = False
+        self.corner_armed = False
+        if self.thread and self.thread.is_alive() and threading.current_thread() != self.thread:
+            try:
+                self.thread.join(timeout=0.4)
+            except Exception:
+                pass
         self.state = 0
         self.stored_clicks = {}
         self.new_game_timer = None
@@ -170,6 +188,7 @@ class BotEngine:
             self.on_status("STANDBY", "#ffe600")
 
     def _loop(self):
+        cur_thread = threading.current_thread()
         if self.on_status:
             self.on_status("SEARCHING", "#00ffcc")
 
@@ -178,9 +197,41 @@ class BotEngine:
                 monitor = sct.monitors[self.monitor_index] if len(sct.monitors) > self.monitor_index else sct.monitors[0]
                 mon_left = monitor["left"]
                 mon_top = monitor["top"]
+                mon_w = monitor["width"]
+                mon_h = monitor["height"]
 
-                while self.is_running:
+                while self.is_running and self.thread == cur_thread:
                     now = time.time()
+
+                    # --- CONTINUOUS CORNER SLIDE CHECK (ANY CORNER) ---
+                    try:
+                        mx, my = pyautogui.position()
+                        rel_x = mx - mon_left
+                        rel_y = my - mon_top
+                        in_corner = (
+                            (rel_x <= 16 and rel_y <= 16) or
+                            (rel_x >= mon_w - 16 and rel_y <= 16) or
+                            (rel_x <= 16 and rel_y >= mon_h - 16) or
+                            (rel_x >= mon_w - 16 and rel_y >= mon_h - 16)
+                        )
+
+                        if self.corner_armed:
+                            if in_corner:
+                                self.is_running = False
+                                self.state = 0
+                                self.stored_clicks = {}
+                                self.new_game_timer = None
+                                if self.on_status:
+                                    self.on_status("PAUSED (CORNER)", "#ffaa00")
+                                if self.on_failsafe:
+                                    self.on_failsafe()
+                                break
+                        else:
+                            # Arm only when the mouse is confirmed comfortably away from any corner
+                            if not in_corner and (30 < rel_x < mon_w - 30) and (30 < rel_y < mon_h - 30):
+                                self.corner_armed = True
+                    except Exception:
+                        pass
 
                     if now < self.click_cooldown_until:
                         time.sleep(0.002)
@@ -227,9 +278,12 @@ class BotEngine:
 
                         t0 = time.perf_counter()
                         for cx, cy in points:
-                            if not self.is_running:
+                            if not self.is_running or self.thread != cur_thread:
                                 break
-                            pyautogui.click(mon_left + cx, mon_top + cy)
+                            try:
+                                pyautogui.click(mon_left + cx, mon_top + cy)
+                            except Exception:
+                                pass
                             if self.speed_cfg["click_delay"] > 0:
                                 time.sleep(self.speed_cfg["click_delay"])
                         dur_ms = (time.perf_counter() - t0) * 1000.0
@@ -256,7 +310,10 @@ class BotEngine:
 
                             if now - self.new_game_timer >= 1.2:
                                 gx, gy = mon_left + btn_x, mon_top + btn_y
-                                pyautogui.click(gx, gy)
+                                try:
+                                    pyautogui.click(gx, gy)
+                                except Exception:
+                                    pass
                                 time.sleep(1.5)
                                 self.new_game_timer = None
                                 self.detected_button_type = None
@@ -268,28 +325,20 @@ class BotEngine:
 
                     time.sleep(0.003)
 
-        except pyautogui.FailSafeException:
-            # Clean emergency abort when mouse slides to corner
-            self.is_running = False
-            self.state = 0
-            self.stored_clicks = {}
-            self.new_game_timer = None
-            self.detected_button_type = None
-            if self.on_status:
-                self.on_status("ABORTED (CORNER)", "#ffaa00")
-            if self.on_failsafe:
-                self.on_failsafe()
         except Exception as e:
-            self.is_running = False
-            self.state = 0
-            self.stored_clicks = {}
-            self.new_game_timer = None
-            if self.on_status:
-                self.on_status("ERROR", "#ff0055")
-            print(f"[BOT LOOP ERROR]: {e}")
-            traceback.print_exc()
+            if self.thread == cur_thread:
+                self.is_running = False
+                self.state = 0
+                self.stored_clicks = {}
+                self.new_game_timer = None
+                if self.on_status:
+                    self.on_status("ERROR", "#ff0055")
+                print(f"[BOT LOOP ERROR]: {e}")
+                traceback.print_exc()
         finally:
-            self.is_running = False
+            if self.thread == cur_thread:
+                self.is_running = False
+                self.new_game_timer = None
 
     def _detect_active_tiles(self, frame):
         h, w = frame.shape[:2]
@@ -320,7 +369,6 @@ class BotEngine:
         Returns (center_x, center_y, button_label) or None.
         """
         h, w = frame.shape[:2]
-        # Restart buttons always reside in the lower half of the screen
         roi = frame[int(h * 0.40):, :]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
@@ -338,22 +386,18 @@ class BotEngine:
         candidates = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 350:  # Valid button size
+            if area > 350:
                 bx, by, bw, bh = cv2.boundingRect(cnt)
                 ratio = bw / float(bh) if bh > 0 else 0
-                # Must be a wide rectangular button
                 if 2.0 <= ratio <= 9.0 and bw > 60:
                     cx = bx + bw // 2
                     cy = int(h * 0.40) + by + bh // 2
 
-                    # Identify button type based on color dominance
                     red_pixels = np.count_nonzero(mask_red[by:by+bh, bx:bx+bw])
                     btn_type = "NEW MINDSNAP" if red_pixels > (area * 0.35) else "NEW GAME"
-
                     candidates.append((cx, cy, area, btn_type))
 
         if candidates:
-            # Pick largest candidate by area
             candidates.sort(key=lambda c: c[2], reverse=True)
             best = candidates[0]
             return (best[0], best[1], best[3])
@@ -491,6 +535,7 @@ class PixelRetroUI:
 
         self.speed_buttons = {}
         self._build_ui()
+        self._poll_hotkeys()
 
     def _build_ui(self):
         # 1. RETRO TITLE BAR
@@ -619,10 +664,10 @@ class PixelRetroUI:
         )
         self.btn_master.pack(fill=tk.X)
 
-        # 6. Bottom Failsafe
+        # 6. Bottom Failsafe & Hotkey Info
         tk.Label(
             self.root,
-            text="EMERGENCY ABORT: SLIDE MOUSE TO CORNER",
+            text="[F6] HOTKEY OR SLIDE MOUSE TO CORNER TO PAUSE",
             font=("Consolas", 7, "bold"),
             fg=self.C_MUTED,
             bg=self.BG_MAIN,
@@ -694,6 +739,16 @@ class PixelRetroUI:
                 border_dark="#004d1f",
             )
 
+    def _poll_hotkeys(self):
+        if sys.platform == "win32":
+            try:
+                # 0x75 is VK_F6
+                if ctypes.windll.user32.GetAsyncKeyState(0x75) & 0x0001:
+                    self.toggle_bot()
+            except Exception:
+                pass
+        self.root.after(40, self._poll_hotkeys)
+
     def update_status_threadsafe(self, text, color):
         def _update():
             self.crt_canvas.itemconfig(self.crt_status_id, text=f"● [ {text} ]", fill=color)
@@ -731,7 +786,7 @@ def run_cli_mode(speed, monitor):
     print("=" * 65)
     print("  MATIKS MEMORY BOT [CLI HEADLESS MODE]")
     print(f"  Speed: [{bot.speed_cfg['tag']}] - {bot.speed_cfg['desc']}")
-    print("  Controls: Move mouse to top-left corner or press Ctrl+C to stop.")
+    print("  Controls: Move mouse to any corner or press Ctrl+C to pause/stop.")
     print("=" * 65)
 
     def cli_status(text, color):
